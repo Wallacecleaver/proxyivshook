@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Twitch HLS Proxy — Installation</title>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Rajdhani:wght@500;600;700&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:#0a0a0b; --surface:#111113; --surface2:#18181b; --border:rgba(255,255,255,0.07);
+    --accent:#9146ff; --accent-dim:rgba(145,70,255,0.1); --green:#48bb78;
+    --text:#f0f0f0; --text2:#999; --muted:#666;
+    --font-display:'Bebas Neue',sans-serif; --font-mono:'Rajdhani',monospace; --font-body:'DM Sans',sans-serif;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background:
+      radial-gradient(900px 500px at 15% -10%, rgba(145,70,255,.13), transparent 60%),
+      var(--bg);
+    color:var(--text); font-family:var(--font-body); min-height:100vh;
+    display:flex; align-items:center; justify-content:center; padding:40px 20px;
+  }
+  .wrap { max-width:640px; width:100%; }
+
+  .badge { display:inline-flex; align-items:center; gap:7px; font-family:var(--font-mono); font-size:12px;
+    color:var(--green); background:rgba(72,187,120,.1); border:1px solid rgba(72,187,120,.25);
+    padding:5px 12px; border-radius:20px; margin-bottom:20px; }
+  .badge .dot { width:6px; height:6px; border-radius:50%; background:var(--green); }
+
+  h1 { font-family:var(--font-display); font-size:clamp(38px,7vw,58px); font-weight:400; letter-spacing:.5px; line-height:1.05; margin-bottom:14px; }
+  h1 span { color:var(--accent); }
+
+  .lead { color:var(--text2); font-size:15px; line-height:1.65; max-width:52ch; margin-bottom:30px; }
+
+  .install-btn { display:inline-flex; align-items:center; gap:10px; background:var(--accent); color:#fff;
+    border:none; border-radius:10px; padding:15px 26px; font-family:var(--font-body); font-weight:700;
+    font-size:15px; text-decoration:none; box-shadow:0 8px 28px rgba(145,70,255,.35); transition:transform .15s, background .15s; }
+  .install-btn:hover { background:#7c33e0; transform:translateY(-1px); }
+
+  .req-note { font-size:12.5px; color:var(--muted); margin-top:12px; line-height:1.6; }
+  .req-note a { color:var(--accent); text-decoration:none; }
+  .req-note a:hover { text-decoration:underline; }
+
+  .features { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:44px; }
+  @media (max-width:520px){ .features{ grid-template-columns:1fr; } }
+  .feature { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:16px 18px; }
+  .feature .icon { font-size:20px; margin-bottom:8px; display:block; }
+  .feature .title { font-size:13.5px; font-weight:700; margin-bottom:4px; }
+  .feature .desc { font-size:12px; color:var(--text2); line-height:1.5; }
+
+  .footer { margin-top:40px; padding-top:24px; border-top:1px solid var(--border); display:flex;
+    justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px; }
+  .footer-links { display:flex; gap:16px; }
+  .footer-links a { color:var(--text2); font-size:12.5px; text-decoration:none; }
+  .footer-links a:hover { color:var(--text); }
+  .version-tag { font-family:var(--font-mono); font-size:12px; color:var(--muted); }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <div class="badge"><span class="dot"></span> Fork actif — synchronisé automatiquement chaque jour</div>
+
+  <h1>Twitch HLS Proxy<br><span>installation.</span></h1>
+
+  <p class="lead">
+    Userscript qui route les flux HLS de Twitch via plusieurs relais, avec fallback automatique,
+    dashboard de statistiques (latence, bande passante estimée, temps de visionnage) et proxys personnalisables.
+  </p>
+
+  <a class="install-btn" href="https://raw.githubusercontent.com/Wallacecleaver/proxyivshook/main/proxyivshook.user.js" id="installLink">
+    ⬇ Installer le script
+  </a>
+
+  <div class="req-note">
+    Nécessite une extension de gestion de userscripts —
+    <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener">Tampermonkey</a> ou
+    <a href="https://violentmonkey.github.io/" target="_blank" rel="noopener">Violentmonkey</a>.
+    Le lien ci-dessus l'ouvre directement dans l'invite d'installation de l'extension.
+  </div>
+
+  <div class="features">
+    <div class="feature"><span class="icon">🔁</span><div class="title">Fallback automatique</div><div class="desc">Bascule sur Twitch si tous les relais échouent.</div></div>
+    <div class="feature"><span class="icon">📊</span><div class="title">Dashboard complet</div><div class="desc">Classement des relais, streamers suivis, logs — dans un nouvel onglet.</div></div>
+    <div class="feature"><span class="icon">🎬</span><div class="title">Qualité en arrière-plan</div><div class="desc">Empêche Twitch de réduire la qualité quand l'onglet n'est pas visible.</div></div>
+    <div class="feature"><span class="icon">⚙️</span><div class="title">Proxys personnalisés</div><div class="desc">Ajoute, réordonne et teste tes propres relais.</div></div>
+  </div>
+
+  <div class="footer">
+    <span class="version-tag" id="versionTag">v1.3.0</span>
+    <div class="footer-links">
+      <a href="https://github.com/Wallacecleaver/proxyivshook" target="_blank" rel="noopener">Code source</a>
+      <a href="https://github.com/Wallacecleaver/proxyivshook/commits/main" target="_blank" rel="noopener">Historique des versions</a>
+      <a href="https://github.com/razeNFR/proxyivshook" target="_blank" rel="noopener">Projet d'origine</a>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
