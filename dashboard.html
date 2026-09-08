@@ -1,0 +1,1265 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Twitch HLS Proxy — Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Rajdhani:wght@500;600;700&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:#0a0a0b; --surface:#111113; --surface2:#18181b; --surface3:#1f1f23; --border:rgba(255,255,255,0.06);
+    --accent:#9146ff; --accent-dim:rgba(145,70,255,0.08); --green:#48bb78;
+    --text:#f0f0f0; --text2:#888; --muted:#666; --input-bg:#0a0a0b; --card-hover:rgba(255,255,255,0.02);
+    --warn:#f59e0b; --error:#ef4444; --info:#60a5fa;
+    --font-display:'Bebas Neue',sans-serif; --font-mono:'Rajdhani',monospace; --font-body:'DM Sans',sans-serif;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--text); font-family:var(--font-body); min-height:100vh; }
+
+  /* ---------- LOGIN ---------- */
+  #login-screen { min-height:100vh; display:flex; align-items:center; justify-content:center; position:relative; }
+  #login-screen::before { content:''; position:fixed; top:-200px; left:50%; transform:translateX(-50%);
+    width:600px; height:500px; background:radial-gradient(ellipse,rgba(145,70,255,0.1) 0%,transparent 70%); pointer-events:none; }
+  .login-card { background:var(--surface); border:1px solid var(--border); border-radius:16px; padding:40px; width:340px;
+    box-shadow:0 24px 80px rgba(0,0,0,0.3); position:relative; z-index:1; }
+  .login-logo { text-align:center; margin-bottom:12px; }
+  .login-logo .logo-icon { width:64px; height:64px; margin:0 auto 10px; border-radius:16px;
+    background:linear-gradient(135deg,var(--accent),#c9a8ff); display:grid; place-items:center;
+    font-size:26px; font-weight:800; color:#fff; box-shadow:0 8px 28px rgba(145,70,255,.4); }
+  .login-title { font-family:var(--font-display); font-size:30px; font-weight:400; letter-spacing:1px; text-align:center; color:var(--text); margin-bottom:2px; }
+  .login-sub { font-size:11px; color:var(--muted); text-align:center; margin-bottom:24px; letter-spacing:.5px; text-transform:uppercase; }
+  .field { position:relative; }
+  .field label { display:block; font-size:12px; color:var(--text2); margin-bottom:6px; font-weight:600; }
+  .field input { width:100%; background:var(--input-bg); border:1px solid var(--border); border-radius:8px; padding:11px 40px 11px 14px;
+    color:var(--text); font-family:var(--font-mono); font-size:14px; transition:border-color .2s; margin-bottom:16px; }
+  .field input:focus { outline:none; border-color:var(--accent); }
+  .pw-toggle { position:absolute; right:12px; top:36px; background:none; border:none; color:var(--muted); cursor:pointer; font-size:13px; }
+  .login-error { font-size:12px; color:var(--accent); text-align:center; margin-bottom:12px; padding:8px 12px;
+    background:rgba(145,70,255,0.08); border:1px solid rgba(145,70,255,0.2); border-radius:8px; display:none; }
+  .btn-primary { width:100%; background:var(--accent); color:#fff; border:none; border-radius:8px; padding:12px;
+    font-family:var(--font-body); font-size:14px; font-weight:700; cursor:pointer; transition:background .2s; }
+  .btn-primary:hover { background:#7c33e0; }
+  .login-note { font-size:10.5px; color:var(--muted); text-align:center; margin-top:16px; line-height:1.5; }
+  @keyframes shake { 0%,100%{transform:translateX(0)} 20%{transform:translateX(-8px)} 40%{transform:translateX(8px)} 60%{transform:translateX(-6px)} 80%{transform:translateX(6px)} }
+  .shake { animation:shake .4s; }
+
+  /* ---------- LAYOUT ---------- */
+  #dashboard { display:none; }
+  #dashboard.active { display:block; }
+  .layout { display:flex; min-height:100vh; }
+  .sidebar { width:250px; background:var(--surface); border-right:1px solid var(--border); display:flex; flex-direction:column;
+    position:fixed; top:0; bottom:0; left:0; z-index:10; overflow-y:auto; }
+  .sidebar-logo { padding:18px 16px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:10px; }
+  .sidebar-logo-icon { width:34px; height:34px; border-radius:10px; flex-shrink:0;
+    background:linear-gradient(135deg,var(--accent),#c9a8ff); display:grid; place-items:center;
+    font-size:15px; font-weight:800; color:#fff; }
+  .sidebar-logo-text .title { font-family:var(--font-display); font-size:20px; letter-spacing:.5px; font-weight:400; color:var(--text); white-space:nowrap; }
+  .sidebar-logo-text .sub { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
+  .sidebar-nav { flex:1; padding:14px 10px; }
+  .nav-section-label { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.8px; padding:8px 10px 6px; font-weight:700; }
+  .nav-item { display:flex; align-items:center; gap:9px; padding:9px 12px; border-radius:8px; font-size:13px; font-weight:600;
+    color:var(--text2); cursor:pointer; margin-bottom:2px; border:none; background:none; width:100%; text-align:left;
+    font-family:var(--font-body); transition:all .15s; }
+  .nav-item:hover { background:var(--surface2); color:var(--text); }
+  .nav-item.active { background:var(--accent-dim); color:var(--accent); }
+  .nav-badge { margin-left:auto; background:var(--accent); color:#fff; font-size:10px; font-weight:800; border-radius:20px;
+    padding:1px 7px; min-width:16px; text-align:center; }
+  .sidebar-bottom { padding:12px 10px; border-top:1px solid var(--border); }
+  .btn-logout { width:100%; background:none; border:1px solid var(--border); border-radius:8px; padding:8px; font-size:12px;
+    color:var(--muted); cursor:pointer; font-family:var(--font-body); transition:all .2s; }
+  .btn-logout:hover { color:var(--accent); border-color:var(--accent); }
+  .kbd-hint { font-size:10px; color:var(--muted); text-align:center; padding:8px 4px 0; }
+  .kbd-hint kbd { background:var(--surface2); border:1px solid var(--border); border-radius:4px; padding:1px 5px; font-family:var(--font-mono); }
+
+  .main { margin-left:250px; padding:28px 32px 60px; }
+  .page { display:none; }
+  .page.active { display:block; }
+  .page-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:24px; flex-wrap:wrap; gap:12px; }
+  .page-title { font-family:var(--font-display); font-size:34px; font-weight:400; letter-spacing:.5px; color:var(--text); margin-bottom:2px; }
+  .page-sub { font-size:13px; color:var(--text2); }
+  .header-actions { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+
+  .btn-add, .btn-outline-sm { display:flex; align-items:center; gap:6px; border-radius:7px; padding:8px 14px; font-size:12px;
+    font-weight:700; font-family:var(--font-body); cursor:pointer; transition:all .2s; border:none; }
+  .btn-add { background:var(--accent-dim); border:1px solid rgba(145,70,255,0.2); color:var(--accent); }
+  .btn-add:hover { background:var(--accent); color:#fff; }
+  .btn-outline-sm { background:none; border:1px solid var(--border); color:var(--text2); }
+  .btn-outline-sm:hover { color:var(--text); border-color:var(--text2); }
+  .btn-outline-sm:disabled { opacity:.5; cursor:not-allowed; }
+  .btn-outline-sm.chip-active { color:var(--accent); border-color:var(--accent); background:var(--accent-dim); }
+
+  .update-time { font-size:11.5px; color:var(--muted); display:flex; align-items:center; gap:7px; font-family:var(--font-mono); }
+  .update-time .spinner { width:12px; height:12px; border:2px solid var(--surface2); border-top-color:var(--accent); border-radius:50%; opacity:0; }
+  .update-time.loading .spinner { opacity:1; animation:spin .8s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+
+  .stats-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:24px; }
+  @media (max-width:1000px){ .stats-grid{ grid-template-columns:repeat(2,1fr); } }
+  .stat-card { position:relative; overflow:hidden; border-radius:16px; padding:18px 20px;
+    background:var(--surface); border:1px solid var(--border);
+    display:flex; flex-direction:column; gap:4px;
+    transition:border-color .2s, transform .2s; }
+  .stat-card::after { content:''; position:absolute; top:-45%; right:-18%; width:150px; height:150px; border-radius:50%;
+    background:radial-gradient(circle, var(--card-glow,rgba(145,70,255,.16)), transparent 70%); pointer-events:none; }
+  .stat-card:hover { transform:translateY(-2px); border-color:rgba(145,70,255,.25); }
+  .stat-card.c-violet { --card-glow:rgba(145,70,255,.26); --card-icon-bg:rgba(145,70,255,.14); }
+  .stat-card.c-green { --card-glow:rgba(72,187,120,.26); --card-icon-bg:rgba(72,187,120,.14); }
+  .stat-card.c-blue { --card-glow:rgba(96,165,250,.26); --card-icon-bg:rgba(96,165,250,.14); }
+  .stat-card.c-orange { --card-glow:rgba(245,158,11,.26); --card-icon-bg:rgba(245,158,11,.14); }
+  .stat-label { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:1.1px; font-weight:700; }
+  .stat-value { font-size:34px; font-weight:700; color:var(--text); line-height:1.05;
+    font-family:var(--font-mono); letter-spacing:.5px; padding-right:44px; }
+  .stat-icon { position:absolute; top:16px; right:16px; width:34px; height:34px; border-radius:10px;
+    display:flex; align-items:center; justify-content:center; font-size:16px;
+    background:var(--card-icon-bg,rgba(145,70,255,.12)); }
+  .stat-hint { font-size:12px; color:var(--text2); margin-top:2px; }
+
+  .card { background:var(--surface); border:1px solid var(--border); border-radius:14px; overflow:hidden; margin-bottom:20px; }
+  .card-head { display:flex; align-items:center; justify-content:space-between; padding:16px 20px; border-bottom:1px solid var(--border);
+    flex-wrap:wrap; gap:8px; background:linear-gradient(180deg, rgba(145,70,255,0.05), rgba(145,70,255,0)); }
+  .card-title { font-size:15px; font-weight:800; color:var(--text); letter-spacing:.01em; }
+  .card-desc { font-size:12px; color:var(--text2); margin-top:2px; }
+  .card-body { padding:20px; }
+
+  .ov-grid-2 { display:grid; grid-template-columns:1.6fr 1fr; gap:20px; }
+  @media (max-width:900px){ .ov-grid-2{ grid-template-columns:1fr; } }
+  .chart-wrap { width:100%; }
+  .chart-svg { width:100%; height:auto; display:block; }
+  .chart-empty { text-align:center; padding:50px 20px; color:var(--muted); font-size:13px; }
+  .chart-range { display:flex; gap:4px; background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:3px; }
+  .range-btn { border:none; background:transparent; color:var(--muted); font-size:11px; font-weight:800;
+    padding:5px 11px; border-radius:6px; cursor:pointer; font-family:var(--font-body); }
+  .range-btn.active { background:var(--accent); color:#fff; }
+
+  .toggle-row { display:flex; align-items:center; justify-content:space-between; gap:14px; padding:12px 4px; cursor:pointer;
+    border-bottom:1px solid var(--border); }
+  .toggle-row:last-child { border-bottom:none; }
+  .toggle-title { font-size:14px; font-weight:600; }
+  .toggle-sub { font-size:12px; color:var(--text2); margin-top:2px; }
+  .toggle-row input[type="checkbox"] { width:42px; height:24px; appearance:none; -webkit-appearance:none; background:var(--surface2);
+    border:1px solid var(--border); border-radius:20px; position:relative; cursor:pointer; transition:background .2s; flex-shrink:0; }
+  .toggle-row input[type="checkbox"]::after { content:""; position:absolute; top:2px; left:2px; width:18px; height:18px;
+    border-radius:50%; background:var(--muted); transition:all .2s; }
+  .toggle-row input[type="checkbox"]:checked { background:var(--accent-dim); }
+  .toggle-row input[type="checkbox"]:checked::after { left:20px; background:var(--accent); }
+
+  .search-bar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; padding:14px 20px; border-bottom:1px solid var(--border); }
+  .search-bar input[type="search"] { flex:1; min-width:180px; background:var(--input-bg); border:1px solid var(--border);
+    border-radius:8px; padding:9px 13px; color:var(--text); font-size:13px; font-family:var(--font-body); }
+  .search-bar input:focus { outline:none; border-color:var(--accent); }
+
+  .relay-row { display:flex; align-items:center; gap:12px; padding:12px 4px; border-bottom:1px solid var(--border);
+    cursor:grab; transition:background .15s; }
+  .relay-row.dragging { opacity:.4; }
+  .relay-row.drag-over { border-top:2px solid var(--accent); }
+  .relay-row:last-child { border-bottom:none; }
+  .drag-handle { color:var(--muted); font-size:13px; flex-shrink:0; cursor:grab; }
+  .relay-info { flex:1; min-width:0; }
+  .relay-name { font-size:14px; font-weight:700; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .relay-tag { font-family:var(--font-mono); font-size:10px; font-weight:700; color:var(--accent); background:var(--accent-dim); padding:2px 7px; border-radius:5px; }
+  .relay-region { font-family:var(--font-mono); font-size:9.5px; font-weight:700; color:var(--info); background:rgba(96,165,250,.12); padding:2px 7px; border-radius:5px; letter-spacing:.3px; }
+  .relay-region.flag { background:none; padding:0; font-size:13px; }
+  .relay-bw { color:var(--text2); }
+  .relay-status { font-family:var(--font-mono); font-size:12px; color:var(--muted); margin-top:3px; display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .relay-status.ok { color:var(--green); }
+  .relay-status.err { color:var(--error); }
+  .relay-rate { color:var(--text2); }
+  .relay-actions { display:flex; gap:4px; flex-shrink:0; }
+  .relay-actions button { width:26px; height:24px; border-radius:6px; border:1px solid var(--border); background:none;
+    color:var(--text2); cursor:pointer; font-size:11px; display:flex; align-items:center; justify-content:center; }
+  .relay-actions button:hover { background:var(--surface2); color:var(--text); }
+  .relay-actions button:disabled { opacity:.25; cursor:default; }
+  .relay-actions button.danger:hover { background:rgba(239,68,68,.12); color:var(--error); border-color:rgba(239,68,68,.3); }
+
+  .form-row { margin-bottom:14px; }
+  .form-row label { display:block; font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; margin-bottom:6px; }
+  .form-row input, .form-row select { width:100%; background:var(--input-bg); border:1px solid var(--border); border-radius:8px; padding:10px 12px; color:var(--text); font-size:13px; font-family:var(--font-body); }
+  .form-row input:focus, .form-row select:focus { outline:none; border-color:var(--accent); }
+  .form-actions { display:flex; gap:10px; justify-content:flex-end; margin-top:6px; }
+  .form-err { color:var(--error); font-size:12px; min-height:16px; }
+
+  .add-form { display:none; padding:16px 20px; border-top:1px solid var(--border); background:var(--surface2); }
+  .add-form.open { display:block; }
+  .form-grid2 { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  @media (max-width:560px){ .form-grid2{ grid-template-columns:1fr; } }
+
+  /* logs */
+  .log-line { display:flex; gap:12px; padding:7px 4px; border-bottom:1px solid var(--border); font-size:12.5px; font-family:var(--font-mono); }
+  .log-line:last-child { border-bottom:none; }
+  .log-line.hidden-row { display:none; }
+  .log-time { color:var(--muted); flex-shrink:0; }
+  .log-code { font-size:10px; font-weight:800; padding:2px 8px; border-radius:6px; text-transform:uppercase; flex-shrink:0; height:fit-content; }
+  .log-code.ok { background:rgba(72,187,120,.15); color:var(--green); }
+  .log-code.warn { background:rgba(245,158,11,.15); color:var(--warn); }
+  .log-code.err { background:rgba(239,68,68,.15); color:var(--error); }
+  .log-code.info { background:rgba(96,165,250,.15); color:var(--info); }
+  .log-code.twitch { background:var(--accent-dim); color:var(--accent); }
+  .log-msg { color:var(--text); flex:1; }
+  .logs-body { max-height:420px; overflow-y:auto; }
+  .logs-empty { text-align:center; padding:30px; color:var(--muted); font-size:13px; }
+  .log-filters { display:flex; gap:6px; flex-wrap:wrap; padding:14px 20px; border-bottom:1px solid var(--border); }
+
+  /* account */
+  .account-empty { display:flex; align-items:center; justify-content:space-between; gap:20px; flex-wrap:wrap; padding:6px 2px; }
+  .account-empty p { margin:0; font-size:13px; color:var(--text2); max-width:44ch; line-height:1.6; }
+  .btn-twitch { display:flex; align-items:center; gap:9px; padding:11px 18px; border-radius:8px; border:none;
+    background:var(--accent); color:#fff; font-family:var(--font-body); font-weight:700; font-size:13px; cursor:pointer; flex-shrink:0; }
+  .btn-twitch:hover { background:#7c33e0; }
+  .account-head { display:flex; align-items:center; gap:14px; margin-bottom:18px; }
+  .avatar { width:50px; height:50px; border-radius:50%; background:linear-gradient(135deg,var(--accent),#c9a8ff);
+    display:flex; align-items:center; justify-content:center; font-family:var(--font-display); font-size:20px; color:#fff; flex-shrink:0; }
+  .avatar.sm { width:34px; height:34px; font-size:14px; }
+  .account-head .name { font-size:16px; font-weight:700; }
+  .account-head .status { font-size:12px; color:var(--text2); display:flex; align-items:center; gap:6px; margin-top:2px; }
+  .status-dot-sm { width:7px; height:7px; border-radius:50%; background:var(--green); }
+  .scope-list { display:flex; flex-wrap:wrap; gap:7px; margin-top:8px; }
+  .scope-chip { font-family:var(--font-mono); font-size:11px; color:var(--text2); background:var(--surface2); border:1px solid var(--border);
+    padding:5px 10px; border-radius:20px; }
+  .scope-chip::before { content:'✓ '; color:var(--green); }
+
+  .chan-list { display:flex; flex-direction:column; }
+  .chan-row { display:flex; align-items:center; gap:12px; padding:10px 4px; border-bottom:1px solid var(--border); }
+  .chan-row:last-child { border-bottom:none; }
+  .chan-row .name { font-size:13.5px; font-weight:700; flex-shrink:0; width:140px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .chan-row .game { font-size:12px; color:var(--text2); flex:1; }
+  .live-pill { font-size:10px; font-weight:800; padding:2px 8px; border-radius:20px; text-transform:uppercase; letter-spacing:.3px; flex-shrink:0; }
+  .live-pill.live { background:rgba(239,68,68,.15); color:var(--error); }
+  .live-pill.off { background:var(--surface2); color:var(--muted); }
+  .chan-viewers { font-family:var(--font-mono); font-size:12px; color:var(--text2); width:80px; text-align:right; flex-shrink:0; }
+
+  .note-box { display:flex; align-items:flex-start; gap:8px; background:var(--accent-dim); border:1px solid rgba(145,70,255,.2);
+    border-radius:10px; padding:11px 14px; margin-bottom:16px; font-size:11.5px; line-height:1.5; color:#cbb8f2; }
+  .note-box strong { color:#efe0ff; }
+
+  .toast { position:fixed; bottom:24px; right:24px; background:var(--surface); border:1px solid var(--border); border-radius:10px;
+    padding:12px 18px; font-size:13px; font-weight:600; color:var(--text); box-shadow:0 8px 32px rgba(0,0,0,0.3);
+    opacity:0; transform:translateY(10px); transition:all .3s; z-index:200; }
+  .toast.show { opacity:1; transform:translateY(0); }
+  .toast.success { border-color:var(--green); }
+  .toast.error { border-color:var(--error); }
+</style>
+</head>
+<body>
+
+<!-- ============= LOGIN ============= -->
+<div id="login-screen">
+  <div class="login-card" id="loginCard">
+    <div class="login-logo"><div class="logo-icon">P</div></div>
+    <div class="login-title">TWITCH HLS PROXY</div>
+    <div class="login-sub">Dashboard — Accès protégé</div>
+    <div class="field">
+      <label>Mot de passe</label>
+      <input type="password" id="pwInput" placeholder="••••••••" autocomplete="off">
+      <button class="pw-toggle" id="pwToggle" type="button">👁</button>
+    </div>
+    <div class="login-error" id="loginError">Mot de passe incorrect.</div>
+    <button class="btn-primary" id="btnLogin">Se connecter</button>
+    <div class="login-note">Verrou côté navigateur — pratique pour éviter les curieux, pas une vraie sécurité. Le mot de passe reste visible dans le code source de la page.</div>
+  </div>
+</div>
+
+<!-- ============= DASHBOARD ============= -->
+<div id="dashboard">
+  <div class="layout">
+
+    <div class="sidebar">
+      <div class="sidebar-logo">
+        <div class="sidebar-logo-icon">P</div>
+        <div class="sidebar-logo-text">
+          <div class="title">TWITCH HLS PROXY</div>
+          <div class="sub">Dashboard v1.3.0</div>
+        </div>
+      </div>
+
+      <div class="sidebar-nav">
+        <div class="nav-section-label">Général</div>
+        <button class="nav-item active" data-page="overview">📊 Vue d'ensemble</button>
+        <button class="nav-item" data-page="relays">🛰 Relais <span class="nav-badge" id="navRelayCount">0</span></button>
+        <button class="nav-item" data-page="history">📈 Historique</button>
+        <button class="nav-item" data-page="streamers">🎥 Streamers</button>
+        <button class="nav-item" data-page="account">👤 Compte Twitch</button>
+        <div class="nav-section-label">Système</div>
+        <button class="nav-item" data-page="logs">🧾 Logs</button>
+        <button class="nav-item" data-page="settings">⚙️ Paramètres</button>
+      </div>
+
+      <div class="kbd-hint"><kbd>T</kbd> pour tester tous les relais</div>
+      <div class="sidebar-bottom">
+        <button class="btn-logout" id="btnLogout">Se déconnecter</button>
+      </div>
+    </div>
+
+    <div class="main">
+
+      <!-- OVERVIEW -->
+      <div class="page active" id="page-overview">
+        <div class="page-header">
+          <div>
+            <div class="page-title">VUE D'ENSEMBLE</div>
+            <div class="page-sub">État général de tes relais de flux</div>
+          </div>
+          <div class="header-actions">
+            <div class="update-time" id="updateTime"><div class="spinner"></div><span id="updateTimeText">jamais testé</span></div>
+            <button class="btn-add" id="btnTestFromOverview">🧪 Tester tous les relais</button>
+          </div>
+        </div>
+
+        <div class="stats-grid">
+          <div class="stat-card c-violet">
+            <div class="stat-icon">🛰</div>
+            <div class="stat-label">Relais actifs</div>
+            <div class="stat-value" id="statActive">0</div>
+            <div class="stat-hint" id="statActiveHint">sur 0 configurés</div>
+          </div>
+          <div class="stat-card c-green">
+            <div class="stat-icon">⚡</div>
+            <div class="stat-label">Meilleure latence</div>
+            <div class="stat-value" id="statLatency">—</div>
+            <div class="stat-hint" id="statLatencyHint">aucun test</div>
+          </div>
+          <div class="stat-card c-blue">
+            <div class="stat-icon">🧪</div>
+            <div class="stat-label">Tests effectués</div>
+            <div class="stat-value" id="statTests">0</div>
+            <div class="stat-hint" id="statTestsHint">taux de réussite global</div>
+          </div>
+          <div class="stat-card c-orange">
+            <div class="stat-icon">🧾</div>
+            <div class="stat-label">Événements logués</div>
+            <div class="stat-value" id="statLogs">0</div>
+            <div class="stat-hint">voir l'onglet Logs</div>
+          </div>
+        </div>
+
+        <div class="stats-grid">
+          <div class="stat-card c-blue">
+            <div class="stat-icon">📶</div>
+            <div class="stat-label">Bande passante (est.)</div>
+            <div class="stat-value" id="statBandwidth" style="font-size:26px;">0 Mo</div>
+            <div class="stat-hint">total cumulé, basé sur la résolution</div>
+          </div>
+          <div class="stat-card c-green">
+            <div class="stat-icon">⏱</div>
+            <div class="stat-label">Temps de visionnage (est.)</div>
+            <div class="stat-value" id="statWatchTime" style="font-size:26px;">0 min</div>
+            <div class="stat-hint">simulé — cumulé sur tous les streamers</div>
+          </div>
+          <div class="stat-card c-violet">
+            <div class="stat-icon">🏆</div>
+            <div class="stat-label">Top streamer regardé</div>
+            <div class="stat-value" id="statTopStreamer" style="font-size:22px;">—</div>
+            <div class="stat-hint" id="statTopStreamerHint">aucune donnée</div>
+          </div>
+          <div class="stat-card c-orange">
+            <div class="stat-icon">💬</div>
+            <div class="stat-label">Tes messages tchat</div>
+            <div class="stat-value" id="statChatMsgs" style="font-size:26px;">0</div>
+            <div class="stat-hint">tous streamers confondus (démo)</div>
+          </div>
+        </div>
+
+        <div class="note-box">
+          ℹ️ <span>Bande passante, temps de visionnage et messages tchat sont des <strong>simulations locales</strong> — comme dans le script Tampermonkey d'origine, ces valeurs sont estimées à partir de la résolution vidéo, pas mesurées sur le réseau.</span>
+        </div>
+
+        <div class="ov-grid-2">
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <div class="card-title">Latence moyenne dans le temps</div>
+                <div class="card-desc">Moyenne des relais activés à chaque test</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <div class="chart-wrap" id="ovChartWrap"><div class="chart-empty">Lance un test pour voir apparaître le graphique.</div></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head"><div class="card-title">Classement</div></div>
+            <div class="card-body" id="overviewTop"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- RELAYS -->
+      <div class="page" id="page-relays">
+        <div class="page-header">
+          <div>
+            <div class="page-title">RELAIS</div>
+            <div class="page-sub">Active, réordonne (glisser-déposer) et teste tes points de passage</div>
+          </div>
+          <div class="header-actions">
+            <button class="btn-outline-sm" id="btnAddRelay">＋ Ajouter</button>
+            <button class="btn-add" id="btnTest">🧪 Tester</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <div class="card-title">Liste des relais</div>
+              <div class="card-desc" id="relayCardDesc">0 relais configurés</div>
+            </div>
+          </div>
+          <div class="search-bar">
+            <input type="search" id="relaySearch" placeholder="Rechercher un relais…">
+          </div>
+          <div class="card-body" id="proxyList" style="padding-top:8px;"></div>
+
+          <div class="add-form" id="addForm">
+            <div class="form-grid2">
+              <div class="form-row"><label>Nom</label><input type="text" id="newName" placeholder="Mon relais" autocomplete="off"></div>
+              <div class="form-row"><label>Région</label>
+                <select id="newRegion">
+                  <option value="EU">EU</option>
+                  <option value="NA">NA</option>
+                  <option value="ASIA">ASIA</option>
+                  <option value="SA">SA</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-row"><label>URL (doit contenir {channel})</label><input type="text" id="newUrl" placeholder="https://exemple.com/live/{channel}" autocomplete="off"></div>
+            <div class="form-err" id="formErr"></div>
+            <div class="form-actions">
+              <button class="btn-outline-sm" id="cancelAdd">Annuler</button>
+              <button class="btn-add" id="confirmAdd">Ajouter le relais</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><div class="card-title">Options</div></div>
+          <div class="card-body">
+            <div class="toggle-row">
+              <div><div class="toggle-title">Fallback automatique</div><div class="toggle-sub">Revenir à Twitch si aucun relais ne répond</div></div>
+              <input type="checkbox" id="optFallback" checked>
+            </div>
+            <div class="toggle-row">
+              <div><div class="toggle-title">Garder la qualité en arrière-plan</div><div class="toggle-sub">Empêche la réduction de qualité quand l'onglet n'est pas visible</div></div>
+              <input type="checkbox" id="optKeepQuality">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- HISTORY -->
+      <div class="page" id="page-history">
+        <div class="page-header">
+          <div>
+            <div class="page-title">HISTORIQUE</div>
+            <div class="page-sub">Latence par relais, test après test</div>
+          </div>
+          <div class="header-actions">
+            <div class="chart-range">
+              <button class="range-btn active" data-range="10">10</button>
+              <button class="range-btn" data-range="30">30</button>
+              <button class="range-btn" data-range="999">Tout</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><div class="card-title">Latence par relais (ms)</div></div>
+          <div class="card-body">
+            <div id="histLegend" style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:14px;"></div>
+            <div class="chart-wrap" id="histChartWrap"><div class="chart-empty">Aucune donnée pour l'instant — lance un test.</div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- STREAMERS -->
+      <div class="page" id="page-streamers">
+        <div class="page-header">
+          <div>
+            <div class="page-title">STREAMERS</div>
+            <div class="page-sub">Temps regardé, tchat et bande passante par streamer (simulé)</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <div class="card-title">Streamers suivis</div>
+              <div class="card-desc">Clique sur le nombre de messages pour voir l'historique</div>
+            </div>
+          </div>
+          <div class="card-body" id="streamersTable"></div>
+        </div>
+      </div>
+
+      <!-- ACCOUNT -->
+      <div class="page" id="page-account">
+        <div class="page-header">
+          <div>
+            <div class="page-title">COMPTE TWITCH</div>
+            <div class="page-sub">Démo — aucune vraie connexion à Twitch</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-body">
+            <div class="account-empty" id="connectEmpty">
+              <p>Connecte un compte pour voir à quoi ressemblerait l'accès aux données Twitch dans ce tableau de bord.</p>
+              <button class="btn-twitch" id="btnConnectTwitch">Se connecter avec Twitch</button>
+            </div>
+
+            <div id="connectFlow" style="display:none; text-align:center; padding:20px;">
+              <div style="width:24px;height:24px;border-radius:50%;border:2.5px solid var(--surface2);border-top-color:var(--accent);margin:0 auto 14px;animation:spin .8s linear infinite;"></div>
+              <div style="font-size:13px;color:var(--text2);">Redirection vers Twitch…</div>
+            </div>
+
+            <div id="connectInput" style="display:none; max-width:320px; margin:0 auto;">
+              <div class="form-row"><label>Pseudo Twitch (démo)</label><input type="text" id="twitchHandle" placeholder="ton_pseudo" autocomplete="off"></div>
+              <div class="form-actions">
+                <button class="btn-outline-sm" id="cancelConnect">Annuler</button>
+                <button class="btn-add" id="confirmConnect">Continuer</button>
+              </div>
+            </div>
+
+            <div id="accountConnected" style="display:none;">
+              <div class="account-head">
+                <div class="avatar" id="avatarInitial">?</div>
+                <div style="flex:1;">
+                  <div class="name" id="accountName">—</div>
+                  <div class="status"><span class="status-dot-sm"></span> Hors ligne — simulation</div>
+                </div>
+                <button class="btn-outline-sm" id="btnDisconnect">Déconnecter</button>
+              </div>
+
+              <div class="stats-grid" style="grid-template-columns:repeat(4,1fr); margin-bottom:22px;">
+                <div class="stat-card c-violet"><div class="stat-label">Follows</div><div class="stat-value" id="capFollows" style="font-size:26px;">0</div></div>
+                <div class="stat-card c-green"><div class="stat-label">Abonnements</div><div class="stat-value" id="capSubs" style="font-size:26px;">0</div></div>
+                <div class="stat-card c-blue"><div class="stat-label">Extensions</div><div class="stat-value" id="capExt" style="font-size:26px;">0</div></div>
+                <div class="stat-card c-orange"><div class="stat-label">En direct</div><div class="stat-value" id="capLive" style="font-size:26px;">0/0</div></div>
+              </div>
+
+              <div class="toggle-sub" style="margin-bottom:6px;">Chaînes suivies (démo) :</div>
+              <div class="chan-list" id="chanList"></div>
+
+              <div class="toggle-sub" style="margin:16px 0 6px;">Scopes qu'une vraie connexion pourrait demander :</div>
+              <div class="scope-list">
+                <span class="scope-chip">user:read:follows</span>
+                <span class="scope-chip">user:read:subscriptions</span>
+                <span class="scope-chip">user:read:email</span>
+                <span class="scope-chip">channel:read:stream_key</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- LOGS -->
+      <div class="page" id="page-logs">
+        <div class="page-header">
+          <div>
+            <div class="page-title">LOGS</div>
+            <div class="page-sub">Historique des actions de cette session</div>
+          </div>
+          <div class="header-actions">
+            <button class="btn-outline-sm" id="btnClearLogs">Effacer</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="search-bar">
+            <input type="search" id="logSearch" placeholder="Rechercher dans les logs…">
+          </div>
+          <div class="log-filters" id="logFilters">
+            <button class="btn-outline-sm chip-active" data-level="all">Tous</button>
+            <button class="btn-outline-sm" data-level="info">Info</button>
+            <button class="btn-outline-sm" data-level="ok">OK</button>
+            <button class="btn-outline-sm" data-level="warn">Warn</button>
+            <button class="btn-outline-sm" data-level="err">Erreur</button>
+            <button class="btn-outline-sm" data-level="twitch">Twitch</button>
+          </div>
+          <div class="card-body logs-body" id="logsBody"></div>
+        </div>
+      </div>
+
+      <!-- SETTINGS -->
+      <div class="page" id="page-settings">
+        <div class="page-header">
+          <div>
+            <div class="page-title">PARAMÈTRES</div>
+            <div class="page-sub">Timeout, re-test automatique et export</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-body">
+            <div class="form-row"><label>Timeout</label>
+              <select id="optTimeout">
+                <option value="2000">2 secondes</option>
+                <option value="3000" selected>3 secondes</option>
+                <option value="5000">5 secondes</option>
+                <option value="8000">8 secondes</option>
+              </select>
+            </div>
+            <div class="form-row"><label>Re-test automatique</label>
+              <select id="optRetest">
+                <option value="5">5 minutes</option>
+                <option value="10" selected>10 minutes</option>
+                <option value="30">30 minutes</option>
+                <option value="60">1 heure</option>
+              </select>
+            </div>
+            <div class="form-actions" style="justify-content:flex-start;">
+              <button class="btn-outline-sm" id="btnExport">⬇ Exporter la config</button>
+              <button class="btn-outline-sm" id="btnImport">⬆ Importer</button>
+              <button class="btn-outline-sm" id="btnReset">↺ Réinitialiser</button>
+              <input type="file" id="fileImport" accept="application/json" style="display:none;">
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function(){
+
+  // ================= AUTH =================
+  var DASH_PASSWORD = 'hlsproxy2026';
+  var SESSION_KEY = 'proxyDashAuthed';
+
+  document.getElementById('pwToggle').addEventListener('click', function(){
+    var inp = document.getElementById('pwInput');
+    inp.type = inp.type === 'password' ? 'text' : 'password';
+  });
+
+  function checkSession(){
+    if(sessionStorage.getItem(SESSION_KEY) === '1'){
+      document.getElementById('login-screen').style.display = 'none';
+      document.getElementById('dashboard').classList.add('active');
+      boot();
+    }
+  }
+
+  document.getElementById('btnLogin').addEventListener('click', tryLogin);
+  document.getElementById('pwInput').addEventListener('keydown', function(e){ if(e.key === 'Enter') tryLogin(); });
+
+  function tryLogin(){
+    var val = document.getElementById('pwInput').value;
+    if(val === DASH_PASSWORD){
+      sessionStorage.setItem(SESSION_KEY, '1');
+      document.getElementById('login-screen').style.display = 'none';
+      document.getElementById('dashboard').classList.add('active');
+      boot();
+    } else {
+      var err = document.getElementById('loginError');
+      err.style.display = 'block';
+      var card = document.getElementById('loginCard');
+      card.classList.remove('shake'); void card.offsetWidth; card.classList.add('shake');
+    }
+  }
+
+  document.getElementById('btnLogout').addEventListener('click', function(){
+    sessionStorage.removeItem(SESSION_KEY);
+    location.reload();
+  });
+
+  // ================= NAV =================
+  document.querySelectorAll('.nav-item[data-page]').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      document.querySelectorAll('.nav-item').forEach(function(b){ b.classList.remove('active'); });
+      document.querySelectorAll('.page').forEach(function(p){ p.classList.remove('active'); });
+      btn.classList.add('active');
+      document.getElementById('page-' + btn.dataset.page).classList.add('active');
+      if(btn.dataset.page === 'history') renderHistoryChart();
+    });
+  });
+
+  document.addEventListener('keydown', function(e){
+    if(e.key.toLowerCase() === 't' && document.getElementById('dashboard').classList.contains('active')){
+      var tag = (document.activeElement && document.activeElement.tagName) || '';
+      if(tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+      runTest();
+    }
+  });
+
+  // ================= TOAST =================
+  function toast(msg, type){
+    var t = document.getElementById('toast');
+    t.textContent = msg;
+    t.className = 'toast show ' + (type||'');
+    setTimeout(function(){ t.className = 'toast ' + (type||''); }, 2600);
+  }
+
+  // ================= STATE =================
+  var STORAGE_KEY = 'proxyDashboardStyledV2';
+
+  var DEFAULTS = [
+    { id:'luminous-eu', name:'Luminous EU', url:'https://eu.luminous.dev/live/{channel}', enabled:true, custom:false, region:'EU', history:[] },
+    { id:'luminous-eu2', name:'Luminous EU 2', url:'https://eu2.luminous.dev/live/{channel}', enabled:true, custom:false, region:'EU', history:[] },
+    { id:'perfprod-eu', name:'Perfprod EU', url:'https://lb-eu.cdn-perfprod.com/live/{channel}', enabled:true, custom:false, region:'EU', history:[] },
+    { id:'perfprod-na', name:'Perfprod NA', url:'https://lb-na.cdn-perfprod.com/live/{channel}', enabled:false, custom:false, region:'NA', history:[] },
+    { id:'nadeko', name:'Nadeko', url:'https://twitch-al.nadeko.net/live/{channel}', enabled:true, custom:false, region:'EU', history:[] }
+  ];
+
+  var state = load();
+  var testsDone = 0, testsOk = 0;
+  var overviewHistory = []; // {t, avg}
+  var logFilterLevel = 'all';
+  var historyRange = 10;
+
+  function load(){
+    try{
+      var raw = localStorage.getItem(STORAGE_KEY);
+      if(raw){ var parsed = JSON.parse(raw); if(parsed && Array.isArray(parsed.proxies)){
+        parsed.proxies.forEach(function(p){ if(!p.region) p.region='EU'; if(!p.history) p.history=[]; });
+        return parsed;
+      } }
+    }catch(e){}
+    return { proxies: DEFAULTS.map(function(p){ return Object.assign({}, p, {lastTest:null}); }), fallback:true, keepQuality:false, timeout:3000, retest:10 };
+  }
+  function save(){ try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }catch(e){} }
+  function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  var PALETTE = ['#9146ff','#48bb78','#60a5fa','#f59e0b','#ef4444','#c9a8ff','#38bdf8'];
+  var REGION_FLAG = { EU:'🇪🇺', NA:'🇺🇸', ASIA:'🌏', SA:'🌎' };
+
+  // ---- simulation bande passante / temps de visionnage / streamers (comme le script Tampermonkey) ----
+  var totalBandwidthBytes = 0, totalWatchMs = 0, totalChatMsgs = 0;
+
+  var STREAMERS = [
+    { channel:'zerator', display:'ZeratoR', watchMs:0, chatMsgs:0, bwBytes:0 },
+    { channel:'squeezie', display:'Squeezie', watchMs:0, chatMsgs:0, bwBytes:0 },
+    { channel:'kameto', display:'Kameto', watchMs:0, chatMsgs:0, bwBytes:0 },
+    { channel:'domingo', display:'Domingo', watchMs:0, chatMsgs:0, bwBytes:0 }
+  ];
+
+  function formatBytes(bytes){
+    if(!bytes) return '0 Mo';
+    var mb = bytes/(1024*1024);
+    if(mb >= 1000) return (mb/1000).toFixed(2) + ' Go';
+    return mb.toFixed(1) + ' Mo';
+  }
+  function formatDur(ms){
+    if(!ms) return '0 min';
+    var totalMin = Math.round(ms/60000);
+    var h = Math.floor(totalMin/60), m = totalMin%60;
+    return h > 0 ? (h + 'h' + (m<10?'0':'') + m) : (m + ' min');
+  }
+
+  function simulateWatchTick(){
+    // simule ~5s de visionnage sur un streamer aléatoire à chaque test lancé
+    var s = STREAMERS[Math.floor(Math.random()*STREAMERS.length)];
+    var kbps = 3000 + Math.random()*3000;
+    var bytes = Math.round((kbps*1000/8) * 5);
+    var chat = Math.random() > 0.6 ? 1 : 0;
+
+    s.watchMs += 5000; s.bwBytes += bytes; s.chatMsgs += chat;
+    totalWatchMs += 5000; totalBandwidthBytes += bytes; totalChatMsgs += chat;
+
+    document.getElementById('statBandwidth').textContent = formatBytes(totalBandwidthBytes);
+    document.getElementById('statWatchTime').textContent = formatDur(totalWatchMs);
+    document.getElementById('statChatMsgs').textContent = totalChatMsgs;
+
+    var top = STREAMERS.slice().sort(function(a,b){ return b.watchMs - a.watchMs; })[0];
+    if(top.watchMs > 0){
+      document.getElementById('statTopStreamer').textContent = top.display;
+      document.getElementById('statTopStreamerHint').textContent = formatDur(top.watchMs) + ' cumulées';
+    }
+    renderStreamersTable();
+  }
+
+  function renderStreamersTable(){
+    var el = document.getElementById('streamersTable');
+    if(!el) return;
+    var sorted = STREAMERS.slice().sort(function(a,b){ return b.watchMs - a.watchMs; });
+    if(!sorted.some(function(s){ return s.watchMs > 0; })){
+      el.innerHTML = '<div class="logs-empty">Lance quelques tests pour générer de l\'activité simulée.</div>';
+      return;
+    }
+    el.innerHTML = sorted.map(function(s, i){
+      return '<div class="chan-row">' +
+        '<div class="avatar sm" style="background:linear-gradient(135deg,'+PALETTE[i%PALETTE.length]+',#4c1d95);">' + s.display.charAt(0) + '</div>' +
+        '<div class="name">' + esc(s.display) + '</div>' +
+        '<div class="game">' + formatDur(s.watchMs) + ' regardées</div>' +
+        '<div class="chan-viewers" style="width:auto;">' + s.chatMsgs + ' msg</div>' +
+        '<div class="chan-viewers">' + formatBytes(s.bwBytes) + '</div>' +
+      '</div>';
+    }).join('');
+  }
+
+  // ================= LOGS =================
+  var logCounter = 0;
+  var allLogEntries = [];
+
+  function log(level, msg){
+    logCounter++;
+    var time = new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+    allLogEntries.unshift({level:level, msg:msg, time:time});
+    renderLogs();
+    document.getElementById('statLogs').textContent = logCounter;
+  }
+
+  function renderLogs(){
+    var body = document.getElementById('logsBody');
+    var q = (document.getElementById('logSearch').value || '').toLowerCase();
+    if(!allLogEntries.length){ body.innerHTML = '<div class="logs-empty">Aucun log pour l\'instant.</div>'; return; }
+
+    body.innerHTML = allLogEntries.map(function(e){
+      var visible = (logFilterLevel === 'all' || e.level === logFilterLevel) && (!q || e.msg.toLowerCase().indexOf(q) >= 0);
+      return '<div class="log-line' + (visible?'':' hidden-row') + '"><span class="log-time">' + e.time + '</span><span class="log-code ' + e.level + '">' + e.level + '</span><span class="log-msg">' + esc(e.msg) + '</span></div>';
+    }).join('');
+  }
+
+  document.getElementById('logSearch').addEventListener('input', renderLogs);
+  document.getElementById('logFilters').addEventListener('click', function(e){
+    var btn = e.target.closest('button[data-level]');
+    if(!btn) return;
+    document.querySelectorAll('#logFilters button').forEach(function(b){ b.classList.remove('chip-active'); });
+    btn.classList.add('chip-active');
+    logFilterLevel = btn.dataset.level;
+    renderLogs();
+  });
+
+  document.getElementById('btnClearLogs').addEventListener('click', function(){
+    allLogEntries = [];
+    logCounter = 0;
+    renderLogs();
+    document.getElementById('statLogs').textContent = '0';
+  });
+
+  // ================= RENDER RELAYS =================
+  var dragSrcIndex = null;
+
+  function renderRelayList(){
+    var list = document.getElementById('proxyList');
+    var q = (document.getElementById('relaySearch').value || '').toLowerCase();
+    list.innerHTML = '';
+
+    state.proxies.forEach(function(p, i){
+      if(q && p.name.toLowerCase().indexOf(q) < 0) return;
+
+      var row = document.createElement('div');
+      row.className = 'relay-row';
+      row.draggable = true;
+      row.dataset.index = i;
+
+      var statusHTML = '<div class="relay-status">non testé</div>';
+      if(p.lastTest){
+        var rate = successRate(p);
+        statusHTML = '<div class="relay-status ' + (p.lastTest.ok?'ok':'err') + '">' +
+          (p.lastTest.ok ? p.lastTest.latency + ' ms' : esc(p.lastTest.status)) +
+          (rate !== null ? '<span class="relay-rate">· ' + rate + '% réussite</span>' : '') +
+          '</div>';
+      }
+
+      row.innerHTML =
+        '<span class="drag-handle">⠿</span>' +
+        '<input type="checkbox" data-role="toggle" ' + (p.enabled?'checked':'') + ' style="width:18px;height:18px;accent-color:var(--accent);flex-shrink:0;">' +
+        '<div class="relay-info"><div class="relay-name">' + esc(p.name) +
+          (p.custom?'<span class="relay-tag">custom</span>':'') +
+          '<span class="relay-region flag" title="'+esc(p.region||'EU')+'">' + (REGION_FLAG[p.region]||'📡') + '</span>' +
+          '<span class="relay-region">' + esc(p.region||'EU') + '</span></div>' + statusHTML + '</div>' +
+        '<div class="relay-actions">' +
+          (p.custom ? '<button data-role="delete" class="danger" title="Supprimer">×</button>' : '') +
+          '<button data-role="up" ' + (i===0?'disabled':'') + '>▲</button>' +
+          '<button data-role="down" ' + (i===state.proxies.length-1?'disabled':'') + '>▼</button>' +
+        '</div>';
+
+      row.querySelector('[data-role=toggle]').addEventListener('change', function(e){
+        p.enabled = e.target.checked;
+        log(e.target.checked ? 'ok':'warn', (e.target.checked?'Relais activé : ':'Relais désactivé : ') + p.name);
+        save(); render();
+      });
+      row.querySelector('[data-role=up]').addEventListener('click', function(){ move(i,-1); });
+      row.querySelector('[data-role=down]').addEventListener('click', function(){ move(i,1); });
+      var delBtn = row.querySelector('[data-role=delete]');
+      if(delBtn) delBtn.addEventListener('click', function(){
+        if(confirm('Supprimer "' + p.name + '" ?')){
+          log('warn', 'Relais supprimé : ' + p.name);
+          state.proxies = state.proxies.filter(function(x){ return x.id !== p.id; });
+          save(); render();
+        }
+      });
+
+      row.addEventListener('dragstart', function(){ dragSrcIndex = i; row.classList.add('dragging'); });
+      row.addEventListener('dragend', function(){ row.classList.remove('dragging'); document.querySelectorAll('.relay-row').forEach(function(r){ r.classList.remove('drag-over'); }); });
+      row.addEventListener('dragover', function(e){ e.preventDefault(); row.classList.add('drag-over'); });
+      row.addEventListener('dragleave', function(){ row.classList.remove('drag-over'); });
+      row.addEventListener('drop', function(e){
+        e.preventDefault();
+        row.classList.remove('drag-over');
+        var target = i;
+        if(dragSrcIndex === null || dragSrcIndex === target) return;
+        var item = state.proxies.splice(dragSrcIndex, 1)[0];
+        state.proxies.splice(target, 0, item);
+        log('info', 'Réordonné par glisser-déposer : ' + item.name);
+        save(); render();
+      });
+
+      list.appendChild(row);
+    });
+
+    var enabled = state.proxies.filter(function(p){ return p.enabled; });
+    document.getElementById('relayCardDesc').textContent = state.proxies.length + ' relais configurés · ' + enabled.length + ' actifs';
+    document.getElementById('navRelayCount').textContent = enabled.length;
+  }
+
+  document.getElementById('relaySearch').addEventListener('input', renderRelayList);
+
+  function successRate(p){
+    if(!p.history || !p.history.length) return null;
+    var ok = p.history.filter(function(h){ return h.ok; }).length;
+    return Math.round(ok / p.history.length * 100);
+  }
+
+  function render(){
+    renderRelayList();
+
+    document.getElementById('optFallback').checked = state.fallback;
+    document.getElementById('optKeepQuality').checked = state.keepQuality;
+    document.getElementById('optTimeout').value = state.timeout;
+    document.getElementById('optRetest').value = state.retest;
+
+    renderOverview();
+  }
+
+  function renderOverview(){
+    var enabled = state.proxies.filter(function(p){ return p.enabled; });
+    document.getElementById('statActive').textContent = enabled.length;
+    document.getElementById('statActiveHint').textContent = 'sur ' + state.proxies.length + ' configurés';
+    document.getElementById('statTests').textContent = testsDone;
+    document.getElementById('statTestsHint').textContent = testsDone ? Math.round(testsOk/testsDone*100) + '% de réussite globale' : 'taux de réussite global';
+
+    var tested = enabled.filter(function(p){ return p.lastTest && p.lastTest.ok; }).sort(function(a,b){ return a.lastTest.latency - b.lastTest.latency; });
+
+    if(tested.length){
+      document.getElementById('statLatency').textContent = tested[0].lastTest.latency + ' ms';
+      document.getElementById('statLatencyHint').textContent = 'via ' + tested[0].name;
+    } else {
+      document.getElementById('statLatency').textContent = '—';
+      document.getElementById('statLatencyHint').textContent = 'aucun test';
+    }
+
+    var top = document.getElementById('overviewTop');
+    if(!tested.length){
+      top.innerHTML = '<div class="logs-empty">Lance un test pour voir le classement.</div>';
+    } else {
+      top.innerHTML = tested.map(function(p, i){
+        var pct = Math.max(8, 100 - (p.lastTest.latency / state.timeout) * 100);
+        return '<div class="toggle-row" style="cursor:default;">' +
+          '<div style="flex:1;"><div class="toggle-title">' + (i+1) + '. ' + esc(p.name) + '</div>' +
+          '<div style="height:6px;background:var(--surface2);border-radius:6px;overflow:hidden;margin-top:6px;width:100%;">' +
+          '<div style="height:100%;background:var(--accent);border-radius:6px;width:' + pct + '%;"></div></div></div>' +
+          '<div class="relay-status ok" style="font-size:14px;">' + p.lastTest.latency + ' ms</div></div>';
+      }).join('');
+    }
+
+    renderOverviewChart();
+  }
+
+  // ================= CHARTS (SVG) =================
+  function buildLineChartSVG(series, w, h, opts){
+    opts = opts || {};
+    var pad = {top:14, right:14, bottom:22, left:36};
+    var innerW = w - pad.left - pad.right;
+    var innerH = h - pad.top - pad.bottom;
+
+    var allVals = [];
+    series.forEach(function(s){ s.points.forEach(function(p){ allVals.push(p.y); }); });
+    var maxV = Math.max.apply(null, allVals.concat([10]));
+    var minV = 0;
+    var n = Math.max.apply(null, series.map(function(s){ return s.points.length; }).concat([1]));
+
+    function x(i){ return pad.left + (n <= 1 ? 0 : (i/(n-1)) * innerW); }
+    function y(v){ return pad.top + innerH - ((v-minV)/(maxV-minV||1)) * innerH; }
+
+    var gridLines = '';
+    for(var g=0; g<=4; g++){
+      var gy = pad.top + (innerH/4)*g;
+      var val = Math.round(maxV - (maxV/4)*g);
+      gridLines += '<line x1="'+pad.left+'" y1="'+gy+'" x2="'+(w-pad.right)+'" y2="'+gy+'" stroke="var(--border)" stroke-dasharray="3 5"/>';
+      gridLines += '<text x="'+(pad.left-8)+'" y="'+(gy+3)+'" font-size="9" fill="var(--muted)" text-anchor="end" font-family="Rajdhani,monospace">'+val+'</text>';
+    }
+
+    var paths = series.map(function(s){
+      var d = s.points.map(function(p,i){ return (i===0?'M':'L') + x(i).toFixed(1) + ',' + y(p.y).toFixed(1); }).join(' ');
+      var dots = s.points.map(function(p,i){ return '<circle cx="'+x(i).toFixed(1)+'" cy="'+y(p.y).toFixed(1)+'" r="2.5" fill="'+s.color+'"/>'; }).join('');
+      return '<path d="'+d+'" fill="none" stroke="'+s.color+'" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>' + dots;
+    }).join('');
+
+    return '<svg class="chart-svg" viewBox="0 0 '+w+' '+h+'" xmlns="http://www.w3.org/2000/svg">' + gridLines + paths + '</svg>';
+  }
+
+  function renderOverviewChart(){
+    var wrap = document.getElementById('ovChartWrap');
+    if(overviewHistory.length < 2){
+      wrap.innerHTML = '<div class="chart-empty">Lance un test pour voir apparaître le graphique.</div>';
+      return;
+    }
+    var pts = overviewHistory.slice(-20).map(function(h,i){ return {x:i, y:h.avg}; });
+    wrap.innerHTML = buildLineChartSVG([{points:pts, color:'#9146ff'}], 560, 220);
+  }
+
+  function renderHistoryChart(){
+    var enabled = state.proxies.filter(function(p){ return p.enabled; });
+    var legend = document.getElementById('histLegend');
+    var wrap = document.getElementById('histChartWrap');
+
+    var withHistory = enabled.filter(function(p){ return p.history && p.history.length; });
+    if(!withHistory.length){
+      legend.innerHTML = '';
+      wrap.innerHTML = '<div class="chart-empty">Aucune donnée pour l\'instant — lance un test.</div>';
+      return;
+    }
+
+    legend.innerHTML = withHistory.map(function(p, i){
+      return '<span style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2);">' +
+        '<span style="width:10px;height:10px;border-radius:3px;background:'+PALETTE[i%PALETTE.length]+';display:inline-block;"></span>' + esc(p.name) + '</span>';
+    }).join('');
+
+    var series = withHistory.map(function(p, i){
+      var pts = p.history.slice(-historyRange).map(function(h, idx){ return {x:idx, y: h.ok ? h.latency : 0}; });
+      return { points: pts, color: PALETTE[i % PALETTE.length] };
+    });
+
+    wrap.innerHTML = buildLineChartSVG(series, 700, 260);
+  }
+
+  document.querySelectorAll('.range-btn').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      document.querySelectorAll('.range-btn').forEach(function(b){ b.classList.remove('active'); });
+      btn.classList.add('active');
+      historyRange = parseInt(btn.dataset.range, 10);
+      renderHistoryChart();
+    });
+  });
+
+  function move(i, dir){
+    var j = i + dir;
+    if(j < 0 || j >= state.proxies.length) return;
+    var tmp = state.proxies[i]; state.proxies[i] = state.proxies[j]; state.proxies[j] = tmp;
+    log('info', 'Réordonné : ' + tmp.name);
+    save(); render();
+  }
+
+  function simulateTest(){
+    return new Promise(function(resolve){
+      var delay = 300 + Math.random()*900;
+      setTimeout(function(){
+        var ok = Math.random() > 0.2;
+        resolve({ ok: ok, status: ok ? 'OK' : (Math.random() > 0.5 ? 'timeout' : '502'), latency: Math.round(delay) });
+      }, delay);
+    });
+  }
+
+  var testing = false;
+  async function runTest(){
+    if(testing) return;
+    var enabled = state.proxies.filter(function(p){ return p.enabled; });
+    if(!enabled.length){ toast('Aucun relais activé', 'error'); log('warn','Test annulé : aucun relais activé'); return; }
+
+    testing = true;
+    var upd = document.getElementById('updateTime');
+    upd.classList.add('loading');
+    document.getElementById('updateTimeText').textContent = 'test en cours…';
+
+    log('info', 'Lancement du test sur ' + enabled.length + ' relais…');
+
+    var sumLatency = 0, okCount = 0;
+
+    for(var i=0;i<enabled.length;i++){
+      var result = await simulateTest();
+      enabled[i].lastTest = { ok: result.ok, status: result.status, latency: result.latency, timestamp: Date.now() };
+      if(!enabled[i].history) enabled[i].history = [];
+      enabled[i].history.push({ ok: result.ok, latency: result.latency, t: Date.now() });
+      if(enabled[i].history.length > 60) enabled[i].history.shift();
+
+      testsDone++;
+      if(result.ok){ testsOk++; okCount++; sumLatency += result.latency; }
+
+      log(result.ok ? 'ok':'err', enabled[i].name + ' → ' + (result.ok ? result.latency + ' ms' : result.status));
+      save(); render();
+      simulateWatchTick();
+    }
+
+    if(okCount) overviewHistory.push({ t: Date.now(), avg: Math.round(sumLatency/okCount) });
+    if(overviewHistory.length > 40) overviewHistory.shift();
+
+    upd.classList.remove('loading');
+    document.getElementById('updateTimeText').textContent = 'testé à ' + new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+
+    renderHistoryChart();
+    testing = false;
+    toast('Test terminé', 'success');
+  }
+
+  document.getElementById('btnTest').addEventListener('click', runTest);
+  document.getElementById('btnTestFromOverview').addEventListener('click', runTest);
+
+  document.getElementById('btnReset').addEventListener('click', function(){
+    if(!confirm('Réinitialiser ? Les relais personnalisés seront supprimés.')) return;
+    state = { proxies: DEFAULTS.map(function(p){ return Object.assign({}, p, {lastTest:null, history:[]}); }), fallback:true, keepQuality:false, timeout:3000, retest:10 };
+    overviewHistory = [];
+    log('warn', 'Configuration réinitialisée');
+    save(); render();
+    toast('Configuration réinitialisée', 'success');
+  });
+
+  document.getElementById('optFallback').addEventListener('change', function(e){ state.fallback = e.target.checked; log('info','Fallback ' + (e.target.checked?'activé':'désactivé')); save(); });
+  document.getElementById('optKeepQuality').addEventListener('change', function(e){ state.keepQuality = e.target.checked; log('info','Qualité arrière-plan ' + (e.target.checked?'activée':'désactivée')); save(); });
+  document.getElementById('optTimeout').addEventListener('change', function(e){ state.timeout = parseInt(e.target.value,10); log('info','Timeout : ' + state.timeout + ' ms'); save(); renderOverview(); });
+  document.getElementById('optRetest').addEventListener('change', function(e){ state.retest = parseInt(e.target.value,10); log('info','Re-test auto : ' + state.retest + ' min'); save(); });
+
+  document.getElementById('btnExport').addEventListener('click', function(){
+    var clean = { proxies: state.proxies.map(function(p){ return {id:p.id,name:p.name,url:p.url,enabled:p.enabled,custom:!!p.custom,region:p.region}; }), fallback: state.fallback, keepQuality: state.keepQuality, timeout: state.timeout, retest: state.retest };
+    var blob = new Blob([JSON.stringify(clean,null,2)], {type:'application/json'});
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a'); a.href = url; a.download = 'proxy-config.json';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
+    log('info', 'Configuration exportée');
+    toast('Configuration exportée', 'success');
+  });
+
+  document.getElementById('btnImport').addEventListener('click', function(){ document.getElementById('fileImport').click(); });
+  document.getElementById('fileImport').addEventListener('change', function(e){
+    var file = e.target.files && e.target.files[0];
+    if(!file) return;
+    var reader = new FileReader();
+    reader.onload = function(){
+      try{
+        var parsed = JSON.parse(reader.result);
+        if(Array.isArray(parsed.proxies)){
+          parsed.proxies.forEach(function(p){ if(!('lastTest' in p)) p.lastTest = null; if(!p.history) p.history=[]; if(!p.region) p.region='EU'; });
+          state = parsed; save(); render();
+          log('ok', 'Configuration importée depuis ' + file.name);
+          toast('Configuration importée', 'success');
+        } else { log('err','Import échoué : fichier invalide'); toast('Fichier invalide', 'error'); }
+      }catch(err){ log('err','Import échoué : JSON invalide'); toast('Fichier invalide', 'error'); }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  });
+
+  // add relay form
+  var addForm = document.getElementById('addForm');
+  document.getElementById('btnAddRelay').addEventListener('click', function(){
+    addForm.classList.toggle('open');
+    if(addForm.classList.contains('open')) document.getElementById('newName').focus();
+  });
+  document.getElementById('cancelAdd').addEventListener('click', function(){
+    addForm.classList.remove('open');
+    document.getElementById('newName').value=''; document.getElementById('newUrl').value='';
+    document.getElementById('formErr').textContent='';
+  });
+  document.getElementById('confirmAdd').addEventListener('click', function(){
+    var name = document.getElementById('newName').value.trim();
+    var url = document.getElementById('newUrl').value.trim();
+    var region = document.getElementById('newRegion').value;
+    var err = document.getElementById('formErr'); err.textContent='';
+
+    if(!name){ err.textContent='Entre un nom.'; return; }
+    if(!url){ err.textContent='Entre une URL.'; return; }
+    if(url.indexOf('{channel}') === -1){ err.textContent="L'URL doit contenir {channel}."; return; }
+    try{
+      var t = new URL(url.replace('{channel}','test'));
+      if(t.protocol !== 'http:' && t.protocol !== 'https:') throw new Error();
+    }catch(e){ err.textContent='URL invalide.'; return; }
+    var dup = state.proxies.some(function(p){ return p.url===url || p.name.toLowerCase()===name.toLowerCase(); });
+    if(dup){ err.textContent='Un relais avec ce nom ou cette URL existe déjà.'; return; }
+
+    state.proxies.push({ id:'custom-'+Date.now(), name:name, url:url, enabled:true, custom:true, region:region, lastTest:null, history:[] });
+    log('ok', 'Relais personnalisé ajouté : ' + name);
+    save(); render();
+    addForm.classList.remove('open');
+    document.getElementById('newName').value=''; document.getElementById('newUrl').value='';
+    toast('Relais ajouté', 'success');
+  });
+
+  // ================= TWITCH CONNECT (démo) =================
+  var connectEmpty = document.getElementById('connectEmpty');
+  var connectFlow = document.getElementById('connectFlow');
+  var connectInput = document.getElementById('connectInput');
+  var accountConnected = document.getElementById('accountConnected');
+
+  var FAKE_CHANNELS = [
+    {name:'Zerator', game:'Just Chatting', live:true},
+    {name:'Squeezie', game:'Minecraft', live:false},
+    {name:'Kameto', game:'League of Legends', live:true},
+    {name:'Domingo', game:'Valorant', live:false},
+    {name:'Ponce', game:'Elden Ring', live:false},
+    {name:'Antoine Daniel', game:'Just Chatting', live:false}
+  ];
+
+  function renderChanList(){
+    var el = document.getElementById('chanList');
+    el.innerHTML = FAKE_CHANNELS.map(function(c){
+      return '<div class="chan-row">' +
+        '<div class="avatar sm">' + c.name.charAt(0) + '</div>' +
+        '<div class="name">' + esc(c.name) + '</div>' +
+        '<div class="game">' + esc(c.game) + '</div>' +
+        '<span class="live-pill ' + (c.live?'live':'off') + '">' + (c.live?'live':'hors ligne') + '</span>' +
+        '<div class="chan-viewers">' + (c.live ? (Math.floor(500+Math.random()*8000)).toLocaleString('fr-FR') + ' vus' : '—') + '</div>' +
+        '</div>';
+    }).join('');
+    var liveCount = FAKE_CHANNELS.filter(function(c){ return c.live; }).length;
+    document.getElementById('capLive').textContent = liveCount + '/' + FAKE_CHANNELS.length;
+  }
+
+  document.getElementById('btnConnectTwitch').addEventListener('click', function(){
+    connectEmpty.style.display = 'none';
+    connectFlow.style.display = 'block';
+    log('twitch', 'Ouverture du flux OAuth Twitch (simulation)…');
+    setTimeout(function(){
+      connectFlow.style.display = 'none';
+      connectInput.style.display = 'block';
+      document.getElementById('twitchHandle').focus();
+      log('twitch', 'Twitch demande une autorisation (simulation)');
+    }, 1300);
+  });
+
+  document.getElementById('cancelConnect').addEventListener('click', function(){
+    connectInput.style.display = 'none';
+    connectEmpty.style.display = 'flex';
+    log('warn', 'Connexion Twitch annulée');
+  });
+
+  document.getElementById('confirmConnect').addEventListener('click', function(){
+    var handle = document.getElementById('twitchHandle').value.trim();
+    if(!handle){ document.getElementById('twitchHandle').focus(); return; }
+
+    connectInput.style.display = 'none';
+    accountConnected.style.display = 'block';
+
+    document.getElementById('accountName').textContent = handle;
+    document.getElementById('avatarInitial').textContent = handle.charAt(0).toUpperCase();
+    document.getElementById('capFollows').textContent = Math.floor(40 + Math.random()*300);
+    document.getElementById('capSubs').textContent = Math.floor(Math.random()*10);
+    document.getElementById('capExt').textContent = Math.floor(1 + Math.random()*10);
+    renderChanList();
+
+    log('twitch', 'Token reçu (simulation) — scopes : follows, subscriptions, email, stream_key');
+    log('ok', 'Connecté en tant que ' + handle + ' (démo)');
+    toast('Connecté (démo) en tant que ' + handle, 'success');
+  });
+
+  document.getElementById('btnDisconnect').addEventListener('click', function(){
+    accountConnected.style.display = 'none';
+    connectEmpty.style.display = 'flex';
+    document.getElementById('twitchHandle').value = '';
+    log('warn', 'Déconnecté du compte Twitch (démo)');
+  });
+
+  // ================= BOOT =================
+  function boot(){
+    log('info', 'Tableau de bord chargé');
+    render();
+    renderStreamersTable();
+  }
+
+  checkSession();
+
+})();
+</script>
+
+</body>
+</html>
