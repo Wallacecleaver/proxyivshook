@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Twitch HLS Proxy v1.3.0
+// @name         Twitch HLS Proxy
 // @namespace    twitch-proxy-ivs
-// @version      1.3.0
+// @version      1.4.0
 // @author       razeNFR
 // @description  Twitch HLS via plusieurs proxys - Dashboard statistiques (nouvel onglet, design amélioré) + fallback automatique + résultats persistants + proxys personnalisés
 // @match        https://www.twitch.tv/*
@@ -21,6 +21,17 @@
     var STORAGE_KEY = 'twitchProxyManagerV1';
     var CHANNEL_CACHE_KEY = 'twitchProxyLastChannelV1';
     var STATS_KEY = 'twitchProxyStatsV1';
+    var UPDATE_CHECK_KEY = 'twitchProxyUpdateCheckV1';
+
+    // Doit être tenu à jour avec le @version de l'en-tête du script.
+    var CURRENT_VERSION = '1.4.0';
+
+    // Même URL que @updateURL : contient toujours la dernière version
+    // publiée. On la relit nous-même (plutôt que de compter sur le
+    // check auto de Tampermonkey) pour pouvoir afficher un badge/bannière
+    // custom dans le menu du script.
+    var UPDATE_CHECK_URL = 'https://raw.githubusercontent.com/razeNFR/proxyivshook/main/proxyivshook.user.js';
+    var UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1 heure
 
     var DEFAULT_TIMEOUT = 2000;
     var DEFAULT_CACHE_DELAY = 5;
@@ -458,6 +469,133 @@
             );
 
         }
+
+    }
+
+
+    // ============================================================
+    // VÉRIFICATION DE MISE À JOUR
+    // ============================================================
+
+    // Compare deux versions "x.y.z" (nombre de segments variable).
+    // Retourne true si `latest` est strictement plus récente que
+    // `current`.
+    function isNewerVersion(latest, current) {
+
+        var a = String(latest).split('.').map(Number);
+        var b = String(current).split('.').map(Number);
+
+        var len = Math.max(a.length, b.length);
+
+        for (var i = 0; i < len; i++) {
+
+            var x = a[i] || 0;
+            var y = b[i] || 0;
+
+            if (x > y) return true;
+            if (x < y) return false;
+
+        }
+
+        return false;
+
+    }
+
+    function loadUpdateCheck() {
+
+        try {
+
+            var saved = localStorage.getItem(UPDATE_CHECK_KEY);
+
+            if (saved) {
+                return JSON.parse(saved) || {};
+            }
+
+        } catch (e) {}
+
+        return {};
+
+    }
+
+    function saveUpdateCheck(data) {
+
+        try {
+
+            localStorage.setItem(
+                UPDATE_CHECK_KEY,
+                JSON.stringify(data)
+            );
+
+        } catch (e) {}
+
+    }
+
+    // null tant qu'aucune mise à jour n'est détectée, sinon
+    // { version: "x.y.z" }.
+    var availableUpdate = null;
+
+    var updateCheckState = loadUpdateCheck();
+
+    if (
+        updateCheckState.latestVersion &&
+        isNewerVersion(updateCheckState.latestVersion, CURRENT_VERSION)
+    ) {
+
+        availableUpdate = { version: updateCheckState.latestVersion };
+
+    }
+
+    function applyUpdateCheckResult(latestVersion) {
+
+        updateCheckState.latestVersion = latestVersion;
+        updateCheckState.lastCheck = Date.now();
+
+        saveUpdateCheck(updateCheckState);
+
+        if (isNewerVersion(latestVersion, CURRENT_VERSION)) {
+            availableUpdate = { version: latestVersion };
+        } else {
+            availableUpdate = null;
+        }
+
+        updateUpdateUI();
+
+    }
+
+    // Interroge le raw GitHub du script (même URL que @updateURL) et
+    // en extrait le numéro de version depuis l'en-tête UserScript,
+    // sans dépendre du check auto de Tampermonkey (on veut notre
+    // propre badge/bannière dans le menu).
+    function checkForScriptUpdate(force) {
+
+        var now = Date.now();
+
+        if (
+            !force &&
+            updateCheckState.lastCheck &&
+            (now - updateCheckState.lastCheck) < UPDATE_CHECK_INTERVAL_MS
+        ) {
+            return;
+        }
+
+        fetch(UPDATE_CHECK_URL, { cache: 'no-store' })
+            .then(function (response) {
+                return response.text();
+            })
+            .then(function (text) {
+
+                var match = text.match(/@version\s+([\d.]+)/);
+
+                if (match) {
+                    applyUpdateCheckResult(match[1]);
+                }
+
+            })
+            .catch(function (e) {
+
+                console.warn('[TwitchProxy] Vérification de mise à jour impossible:', e);
+
+            });
 
     }
 
@@ -1677,6 +1815,16 @@
 
             <div class="tp9-content">
 
+<div class="tp9-update-banner" style="display:none;">
+    <div class="tp9-update-icon">⬆️</div>
+    <div class="tp9-update-text">
+        <div class="tp9-update-title">Nouvelle mise à jour disponible</div>
+        <div class="tp9-update-version"></div>
+        <div class="tp9-update-hint">Actualise la page une fois installée</div>
+    </div>
+    <button class="tp9-update-btn" type="button">Mettre à jour</button>
+</div>
+
 <div class="tp9-active-proxy"></div>
 
 <div class="tp9-section-title tp9-proxy-title-row">
@@ -2123,7 +2271,102 @@ document.addEventListener(
             );
 
 
+        dashboard
+            .querySelector('.tp9-update-btn')
+            .addEventListener(
+                'click',
+                function () {
+
+                    // Ouvre le .user.js brut dans un nouvel onglet :
+                    // Tampermonkey détecte l'URL et propose
+                    // automatiquement l'installation/mise à jour.
+                    window.open(UPDATE_CHECK_URL, '_blank');
+
+                    // Le code de CET onglet reste l'ancien tant
+                    // qu'il n'est pas rechargé (Tampermonkey ne peut
+                    // pas "recharger à chaud" un script déjà en
+                    // cours d'exécution) : on laisse le temps de
+                    // valider l'install dans l'autre onglet, puis on
+                    // propose de rafraîchir pour faire disparaître
+                    // le badge/la bannière.
+                    setTimeout(
+                        function () {
+
+                            if (
+                                confirm(
+                                    'As-tu terminé la mise à jour dans l\'autre onglet ?\n\n' +
+                                    'Actualiser cette page maintenant pour appliquer la nouvelle version ?'
+                                )
+                            ) {
+
+                                location.reload();
+
+                            }
+
+                        },
+                        4000
+                    );
+
+                }
+            );
+
+
         renderDashboard();
+
+        updateUpdateUI();
+
+    }
+
+
+    // ------------------------------------------------------------
+    // BADGE / BANNIÈRE DE MISE À JOUR
+    // ------------------------------------------------------------
+
+    function updateUpdateUI() {
+
+        if (dashboardButton) {
+
+            var badge =
+                dashboardButton.querySelector(
+                    '.tp9-update-badge'
+                );
+
+            if (badge) {
+
+                badge.style.display =
+                    availableUpdate ? 'block' : 'none';
+
+            }
+
+        }
+
+        if (dashboard) {
+
+            var banner =
+                dashboard.querySelector(
+                    '.tp9-update-banner'
+                );
+
+            if (banner) {
+
+                if (availableUpdate) {
+
+                    banner.style.display = 'flex';
+
+                    banner
+                        .querySelector('.tp9-update-version')
+                        .textContent =
+                        'Version ' + availableUpdate.version;
+
+                } else {
+
+                    banner.style.display = 'none';
+
+                }
+
+            }
+
+        }
 
     }
 
@@ -2329,6 +2572,39 @@ document.addEventListener(
                 `;
 
 
+                function toggleProxyEnabled() {
+
+                    proxy.enabled =
+                        !proxy.enabled;
+
+                    saveConfig(
+                        pageConfig
+                    );
+
+                    broadcastConfig();
+
+                    renderDashboard();
+
+                }
+
+
+                row
+                    .querySelector(
+                        '.tp9-enabled'
+                    )
+                    .addEventListener(
+                        'click',
+                        function (event) {
+
+                            // Empêche le double-toggle : le clic sur
+                            // la checkbox remonte aussi jusqu'au
+                            // listener du "tp9-proxy-main" ci-dessous.
+                            event.stopPropagation();
+
+                        }
+                    );
+
+
                 row
                     .querySelector(
                         '.tp9-enabled'
@@ -2347,6 +2623,32 @@ document.addEventListener(
                             broadcastConfig();
 
                             renderDashboard();
+
+                        }
+                    );
+
+
+                // Toute la ligne (avatar, nom, statut) est cliquable
+                // pour cocher/décocher le proxy, pas seulement la
+                // petite case à cocher.
+                row
+                    .querySelector(
+                        '.tp9-proxy-main'
+                    )
+                    .addEventListener(
+                        'click',
+                        function (event) {
+
+                            // Le clic recrée la ligne via
+                            // renderDashboard() (elle est détachée
+                            // du DOM), donc s'il continuait à
+                            // remonter, le listener global "clic en
+                            // dehors du menu" ne retrouverait plus
+                            // son ancêtre #tp9-dashboard via
+                            // closest() et fermerait le menu à tort.
+                            event.stopPropagation();
+
+                            toggleProxyEnabled();
 
                         }
                     );
@@ -3042,7 +3344,8 @@ function showAddProxyForm() {
 
 
         dashboardButton.innerHTML =
-            '<svg width="16" height="16" viewBox="0 0 24 24" fill="white" xmlns="http://www.w3.org/2000/svg"><path d="M12 2L3 6v6c0 5.25 3.75 10.15 9 11.25C17.25 22.15 21 17.25 21 12V6L12 2z"/></svg>';
+            '<svg width="16" height="16" viewBox="0 0 24 24" fill="white" xmlns="http://www.w3.org/2000/svg"><path d="M12 2L3 6v6c0 5.25 3.75 10.15 9 11.25C17.25 22.15 21 17.25 21 12V6L12 2z"/></svg>' +
+            '<span class="tp9-update-badge" style="display:none;"></span>';
 
 
         dashboardButton.title =
@@ -3539,7 +3842,7 @@ dashboardButton.style.visibility =
 
                 vertical-align: middle;
 
-                overflow: hidden;
+                overflow: visible;
 
                 text-decoration: none;
                 white-space: nowrap;
@@ -3785,6 +4088,133 @@ dashboardButton.style.visibility =
             }
 
 
+            /* =====================================================
+               MISE À JOUR
+            ===================================================== */
+
+            .tp9-update-badge {
+
+                position: absolute;
+
+                top: -2px;
+                right: 4px;
+
+                width: 10px;
+                height: 10px;
+
+                border-radius: 50%;
+
+                background: #ff4d4f;
+
+                border: 2px solid rgba(15,15,15,.97);
+
+                box-shadow: 0 0 6px rgba(255,77,79,.8);
+
+            }
+
+
+            .tp9-update-banner {
+
+                display: flex;
+
+                align-items: center;
+
+                gap: 10px;
+
+                padding: 10px 12px;
+
+                margin-bottom: 10px;
+
+                border-radius: 9px;
+
+                background: linear-gradient(135deg, rgba(255,77,79,.18), rgba(255,77,79,.05));
+
+                border: 1px solid rgba(255,77,79,.35);
+
+            }
+
+
+            .tp9-update-icon {
+
+                flex: 0 0 auto;
+
+                font-size: 18px;
+
+            }
+
+
+            .tp9-update-text {
+
+                flex: 1 1 auto;
+
+                min-width: 0;
+
+            }
+
+
+            .tp9-update-title {
+
+                font-size: 12px;
+
+                font-weight: 700;
+
+                color: #fff;
+
+            }
+
+
+            .tp9-update-version {
+
+                font-size: 11px;
+
+                color: #ff9d9e;
+
+                margin-top: 1px;
+
+            }
+
+
+            .tp9-update-hint {
+
+                font-size: 10px;
+
+                color: #c98a8b;
+
+                margin-top: 3px;
+
+            }
+
+
+            .tp9-update-btn {
+
+                flex: 0 0 auto;
+
+                border: 0;
+
+                border-radius: 7px;
+
+                padding: 6px 10px;
+
+                background: #ff4d4f;
+
+                color: #fff;
+
+                font-size: 11px;
+
+                font-weight: 700;
+
+                cursor: pointer;
+
+            }
+
+
+            .tp9-update-btn:hover {
+
+                background: #ff6b6d;
+
+            }
+
+
             .tp9-section-title {
 
                 font-size: 10px;
@@ -3881,6 +4311,8 @@ dashboardButton.style.visibility =
 
 
             .tp9-proxy-main {
+
+                cursor: pointer;
 
                 display: flex;
 
@@ -9015,11 +9447,31 @@ dashboardButton.style.visibility =
 
         createPlayerButton();
 
+        // Applique tout de suite le badge si une mise à jour était
+        // déjà connue depuis un check précédent (avant même le
+        // premier fetch de cette session).
+        updateUpdateUI();
+
         // Lancement du test auto après 3 secondes
         // (laisse le temps à la page de charger)
         setTimeout(function () {
             autoTestOnLoad();
         }, 3000);
+
+        // Vérification de mise à jour : toujours forcée à chaque
+        // chargement/refresh de page (l'utilisateur veut être fixé
+        // immédiatement, pas attendre le cooldown d'1h), puis on
+        // relance le check périodiquement (celui-ci respecte le
+        // cooldown) pour couvrir les sessions qui restent ouvertes
+        // longtemps sans reload.
+        checkForScriptUpdate(true);
+
+        setInterval(
+            function () {
+                checkForScriptUpdate();
+            },
+            UPDATE_CHECK_INTERVAL_MS
+        );
 
 
         // Le chat Twitch déclenche des dizaines de mutations DOM
