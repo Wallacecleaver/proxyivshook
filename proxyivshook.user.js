@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch HLS Proxy
 // @namespace    twitch-proxy-ivs
-// @version      1.4.0
+// @version      1.4.1
 // @author       razeNFR
 // @description  Twitch HLS via plusieurs proxys - Dashboard statistiques (nouvel onglet, design amélioré) + fallback automatique + résultats persistants + proxys personnalisés
 // @match        https://www.twitch.tv/*
@@ -24,7 +24,7 @@
     var UPDATE_CHECK_KEY = 'twitchProxyUpdateCheckV1';
 
     // Doit être tenu à jour avec le @version de l'en-tête du script.
-    var CURRENT_VERSION = '1.4.0';
+    var CURRENT_VERSION = '1.4.1';
 
     // Même URL que @updateURL : contient toujours la dernière version
     // publiée. On la relit nous-même (plutôt que de compter sur le
@@ -810,6 +810,7 @@
             bandwidthByProxy: {},
             streamers: {},
             logs: [],
+            dailyWatchTime: {},
             totals: {
                 chatMessagesGlobal: 0,
                 bandwidthBytesGlobal: 0,
@@ -839,6 +840,7 @@
                     stats.bandwidthByProxy = parsed.bandwidthByProxy || {};
                     stats.streamers = parsed.streamers || {};
                     stats.logs = Array.isArray(parsed.logs) ? parsed.logs : [];
+                    stats.dailyWatchTime = parsed.dailyWatchTime || {};
 
                     stats.totals = Object.assign(
                         defaultStats().totals,
@@ -1464,6 +1466,41 @@
 
     var BANDWIDTH_TICK_MS = 5000;
 
+    // ------------------------------------------------------------
+    // HISTORIQUE JOURNALIER DU TEMPS DE VISIONNAGE (graphique)
+    // ------------------------------------------------------------
+
+    function pad2(n) {
+        return n < 10 ? '0' + n : String(n);
+    }
+
+    function dateKeyFor(date) {
+        return date.getFullYear() + '-' + pad2(date.getMonth() + 1) + '-' + pad2(date.getDate());
+    }
+
+    var DAILY_WATCH_HISTORY_DAYS = 370;
+
+    // Les clés "YYYY-MM-DD" se comparent lexicographiquement comme
+    // des dates, pas besoin de les reparser pour trouver les vieilles
+    // entrées à purger.
+    function pruneDailyWatchTime() {
+
+        var cutoff = new Date();
+
+        cutoff.setDate(cutoff.getDate() - DAILY_WATCH_HISTORY_DAYS);
+
+        var cutoffKey = dateKeyFor(cutoff);
+
+        Object.keys(pageStats.dailyWatchTime).forEach(function (key) {
+
+            if (key < cutoffKey) {
+                delete pageStats.dailyWatchTime[key];
+            }
+
+        });
+
+    }
+
     function trackBandwidthAndWatchTime() {
 
         var channel = getTestChannel();
@@ -1490,6 +1527,13 @@
 
         pageStats.totals.watchTimeMsGlobal += BANDWIDTH_TICK_MS;
         pageStats.totals.bandwidthBytesGlobal += bytes;
+
+        var dayKey = dateKeyFor(new Date());
+
+        pageStats.dailyWatchTime[dayKey] =
+            (pageStats.dailyWatchTime[dayKey] || 0) + BANDWIDTH_TICK_MS;
+
+        pruneDailyWatchTime();
 
         if (
             activeProxyInfo &&
@@ -2515,8 +2559,15 @@ document.addEventListener(
                                 class="tp9-delete"
                                 type="button"
                                 title="Supprimer"
+                                aria-label="Supprimer"
                             >
-                                ×
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M4 7h16"/>
+                                    <path d="M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/>
+                                    <path d="M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13"/>
+                                    <path d="M10 11v6"/>
+                                    <path d="M14 11v6"/>
+                                </svg>
                             </button>
                         `
                         : '';
@@ -2662,7 +2713,17 @@ document.addEventListener(
                         )
                         .addEventListener(
                             'click',
-                            function () {
+                            function (event) {
+
+                                // Même piège que le toggle d'activation
+                                // ci-dessus : la ligne est détruite par
+                                // renderDashboard() dans
+                                // deleteCustomProxy(), donc il faut
+                                // empêcher la remontée AVANT, sinon le
+                                // listener global "clic en dehors du
+                                // menu" ne retrouve plus son ancêtre
+                                // #tp9-dashboard et ferme tout le menu.
+                                event.stopPropagation();
 
                                 deleteCustomProxy(
                                     proxy.id
@@ -2935,42 +2996,53 @@ function showAddProxyForm() {
 
     container.innerHTML = `
 
-        <div class="tp9-section-title tp9-add-title">
-            AJOUTER UN PROXY
-        </div>
-
         <div class="tp9-add-form">
 
-            <label>
-                Nom
-            </label>
+            <div class="tp9-add-form-header">
+                <span class="tp9-add-form-icon">⚙️</span>
+                <span class="tp9-add-form-title">Ajouter un proxy</span>
+            </div>
 
-            <input
-                type="text"
-                class="tp9-new-name"
-                placeholder="Mon proxy"
-                autocomplete="off"
-            >
+            <div class="tp9-add-field">
 
-            <label>
-                URL
-            </label>
+                <label for="tp9-new-name">
+                    Nom
+                </label>
 
-            <input
-                type="text"
-                class="tp9-new-url"
-                placeholder="https://exemple.com/live/{channel}"
-                autocomplete="off"
-            >
+                <input
+                    id="tp9-new-name"
+                    type="text"
+                    class="tp9-new-name"
+                    placeholder="Mon proxy"
+                    autocomplete="off"
+                >
 
-            <div class="tp9-help">
-                L'URL doit contenir
-                <code>{channel}</code>
+            </div>
+
+            <div class="tp9-add-field">
+
+                <label for="tp9-new-url">
+                    URL
+                </label>
+
+                <input
+                    id="tp9-new-url"
+                    type="text"
+                    class="tp9-new-url"
+                    placeholder="https://exemple.com/live/{channel}"
+                    autocomplete="off"
+                >
+
+                <div class="tp9-help">
+                    L'URL doit contenir
+                    <code>{channel}</code>
+                </div>
+
             </div>
 
             <div class="tp9-form-error"></div>
 
-            <div class="tp9-actions">
+            <div class="tp9-add-form-actions">
 
                 <button
                     class="tp9-cancel-add"
@@ -2983,7 +3055,7 @@ function showAddProxyForm() {
                     class="tp9-confirm-add"
                     type="button"
                 >
-                    Ajouter
+                    ＋ Ajouter
                 </button>
 
             </div>
@@ -3017,7 +3089,14 @@ function showAddProxyForm() {
         )
         .addEventListener(
             'click',
-            function () {
+            function (event) {
+
+                // Le clic vide le conteneur (le bouton lui-même est
+                // détaché du DOM) : s'il continuait à remonter, le
+                // listener global "clic en dehors du menu" ne
+                // retrouverait plus son ancêtre #tp9-dashboard via
+                // closest() et fermerait tout le menu à tort.
+                event.stopPropagation();
 
                 container.innerHTML = '';
 
@@ -3036,7 +3115,9 @@ function showAddProxyForm() {
         )
         .addEventListener(
             'click',
-            function () {
+            function (event) {
+
+                event.stopPropagation();
 
                 var name =
                     nameInput.value.trim();
@@ -4522,28 +4603,57 @@ dashboardButton.style.visibility =
 
             .tp9-delete {
 
-                width: 25px;
-                height: 23px;
+                width: 28px;
+                height: 28px;
 
                 padding: 0;
 
-                border: 0;
+                display: flex;
 
-                border-radius: 4px;
+                align-items: center;
 
-                background: rgba(255,255,255,.08);
+                justify-content: center;
 
-                color: #ff6b6b !important;
+                border: 1px solid rgba(255,255,255,.08);
+
+                border-radius: 50%;
+
+                background: rgba(255,255,255,.05);
+
+                color: #b8899a !important;
 
                 cursor: pointer;
+
+                transition:
+                    background-color .15s ease,
+                    border-color .15s ease,
+                    color .15s ease,
+                    transform .1s ease;
+
+            }
+
+
+            .tp9-delete svg {
+
+                display: block;
 
             }
 
 
             .tp9-delete:hover {
 
-                background:
-                    rgba(255,70,70,.18) !important;
+                background: rgba(255,70,70,.16) !important;
+
+                border-color: rgba(255,70,70,.4);
+
+                color: #ff8a8a !important;
+
+            }
+
+
+            .tp9-delete:active {
+
+                transform: scale(.92);
 
             }
 
@@ -5089,81 +5199,147 @@ dashboardButton.style.visibility =
                FORMULAIRE AJOUT
             ===================================================== */
 
+            .tp9-add-container {
+
+                margin-top: 10px;
+
+            }
+
+
             .tp9-add-form {
 
                 display: flex;
 
                 flex-direction: column;
 
-                gap: 7px;
+                gap: 12px;
+
+                padding: 14px;
+
+                border-radius: 10px;
+
+                background: rgba(145,71,255,.06);
+
+                border: 1px solid rgba(145,71,255,.18);
 
             }
 
 
-            .tp9-add-form label {
+            .tp9-add-form-header {
 
-                color: #aaa;
+                display: flex;
 
-                font-size: 11px;
+                align-items: center;
 
-                font-weight: 600;
-
-                margin-top: 3px;
+                gap: 8px;
 
             }
 
 
-            .tp9-add-form input {
+            .tp9-add-form-icon {
+
+                flex: 0 0 auto;
+
+                width: 24px;
+                height: 24px;
+
+                border-radius: 7px;
+
+                display: flex;
+
+                align-items: center;
+
+                justify-content: center;
+
+                font-size: 12px;
+
+                background: rgba(145,71,255,.18);
+
+            }
+
+
+            .tp9-add-form-title {
+
+                font-size: 12.5px;
+
+                font-weight: 700;
+
+                color: #efeff1;
+
+            }
+
+
+            .tp9-add-field {
+
+                display: flex;
+
+                flex-direction: column;
+
+                gap: 5px;
+
+            }
+
+
+            .tp9-add-field label {
+
+                color: #999;
+
+                font-size: 10.5px;
+
+                font-weight: 700;
+
+                letter-spacing: .3px;
+
+                text-transform: uppercase;
+
+            }
+
+
+            .tp9-add-field input {
 
                 width: 100%;
 
-                min-height: 34px;
+                min-height: 36px;
 
-                padding:
-                    7px 9px;
+                padding: 8px 10px;
 
                 border:
                     1px solid
                     rgba(255,255,255,.12);
 
-                border-radius: 6px;
+                border-radius: 8px;
 
                 outline: none;
 
-                background: #222;
+                background: rgba(0,0,0,.35);
 
                 color: white;
 
                 font-family: Arial, sans-serif;
 
-                font-size: 12px;
+                font-size: 12.5px;
 
                 box-sizing: border-box;
 
-            }
-
-
-            .tp9-add-form input:focus {
-
-                border-color:
-                    #9147ff;
+                transition: border-color .12s ease, background-color .12s ease;
 
             }
 
-			.tp9-add-container {
-    margin-top: 10px;
-}
 
-.tp9-add-title {
-    margin-top: 10px;
-    margin-bottom: 8px;
-}
+            .tp9-add-field input:focus {
+
+                border-color: #9147ff;
+
+                background: rgba(0,0,0,.5);
+
+            }
+
 
             .tp9-help {
 
-                color: #777;
+                color: #888;
 
-                font-size: 10px;
+                font-size: 10.5px;
 
             }
 
@@ -5173,7 +5349,7 @@ dashboardButton.style.visibility =
                 color: #bf94ff;
 
                 background:
-                    rgba(255,255,255,.06);
+                    rgba(255,255,255,.08);
 
                 padding:
                     1px 4px;
@@ -5187,9 +5363,90 @@ dashboardButton.style.visibility =
 
                 min-height: 15px;
 
-                color: #ff6b6b;
+                color: #ff8a8a;
 
                 font-size: 11px;
+
+                font-weight: 600;
+
+            }
+
+
+            .tp9-add-form-actions {
+
+                display: flex;
+
+                gap: 8px;
+
+            }
+
+
+            .tp9-add-form-actions button {
+
+                flex: 1;
+
+                padding: 9px;
+
+                border-radius: 8px;
+
+                font-size: 12.5px;
+
+                font-weight: 700;
+
+                cursor: pointer;
+
+                transition:
+                    background-color .12s ease,
+                    border-color .12s ease,
+                    filter .12s ease,
+                    transform .1s ease;
+
+            }
+
+
+            .tp9-add-form-actions button:active {
+
+                transform: scale(.97);
+
+            }
+
+
+            .tp9-cancel-add {
+
+                border: 1px solid rgba(255,255,255,.1);
+
+                background: rgba(255,255,255,.05);
+
+                color: #ccc;
+
+            }
+
+
+            .tp9-cancel-add:hover {
+
+                background: rgba(255,255,255,.1);
+
+                color: white;
+
+            }
+
+
+            .tp9-confirm-add {
+
+                border: 0;
+
+                background: linear-gradient(135deg, #9147ff, #772ce8);
+
+                color: white;
+
+                box-shadow: 0 4px 14px rgba(145,71,255,.3);
+
+            }
+
+
+            .tp9-confirm-add:hover {
+
+                filter: brightness(1.1);
 
             }
 
@@ -6693,6 +6950,215 @@ dashboardButton.style.visibility =
 
             }
 
+
+            .tp9s-chart-range {
+
+                display: flex;
+
+                gap: 6px;
+
+            }
+
+
+            .tp9s-chart-range-btn {
+
+                background: rgba(255,255,255,.05);
+
+                border: 1px solid rgba(255,255,255,.08);
+
+                color: #ccc;
+
+                border-radius: 8px;
+
+                padding: 5px 10px;
+
+                font-size: 11px;
+
+                font-weight: 600;
+
+                cursor: pointer;
+
+                transition: background .15s, color .15s;
+
+            }
+
+
+            .tp9s-chart-range-btn:hover {
+
+                background: rgba(255,255,255,.1);
+
+            }
+
+
+            .tp9s-chart-range-active {
+
+                background: #9147ff;
+
+                border-color: #9147ff;
+
+                color: #fff;
+
+            }
+
+
+            .tp9s-chart-canvas {
+
+                position: relative;
+
+                width: 100%;
+
+                height: 160px;
+
+                margin-top: 4px;
+
+            }
+
+
+            .tp9s-chart-svg {
+
+                width: 100%;
+
+                height: 100%;
+
+                display: block;
+
+                overflow: visible;
+
+                cursor: crosshair;
+
+            }
+
+
+            .tp9s-chart-area {
+
+                fill: url(#tp9sChartFill);
+
+                stroke: none;
+
+            }
+
+
+            .tp9s-chart-line {
+
+                fill: none;
+
+                stroke: url(#tp9sChartStroke);
+
+                stroke-width: 2.5px;
+
+                stroke-linecap: round;
+
+                stroke-linejoin: round;
+
+                filter: drop-shadow(0 2px 6px rgba(145,71,255,.45));
+
+            }
+
+
+            .tp9s-chart-axis-label {
+
+                fill: #777;
+
+                font-size: 9.5px;
+
+                font-family: "Inter", Arial, sans-serif;
+
+            }
+
+
+            .tp9s-chart-hover {
+
+                opacity: 0;
+
+                transition: opacity .12s ease;
+
+                pointer-events: none;
+
+            }
+
+
+            .tp9s-chart-hovering .tp9s-chart-hover {
+
+                opacity: 1;
+
+            }
+
+
+            .tp9s-chart-hover-line {
+
+                stroke: rgba(255,255,255,.28);
+
+                stroke-width: 1;
+
+                stroke-dasharray: 3 3;
+
+            }
+
+
+            .tp9s-chart-hover-dot {
+
+                fill: #fff;
+
+                stroke: #9147ff;
+
+                stroke-width: 2.5px;
+
+                filter: drop-shadow(0 0 4px rgba(145,71,255,.8));
+
+            }
+
+
+            .tp9s-chart-tooltip {
+
+                position: absolute;
+
+                left: 0;
+                top: 0;
+
+                transform: translate(-50%, -130%);
+
+                padding: 5px 9px;
+
+                border-radius: 7px;
+
+                background: #17171c;
+
+                border: 1px solid rgba(255,255,255,.12);
+
+                color: #efeff1;
+
+                font-size: 11px;
+
+                font-weight: 600;
+
+                white-space: nowrap;
+
+                pointer-events: none;
+
+                opacity: 0;
+
+                transition: opacity .12s ease;
+
+                box-shadow: 0 6px 18px rgba(0,0,0,.4);
+
+                z-index: 2;
+
+            }
+
+
+            .tp9s-chart-tooltip-left {
+
+                transform: translate(-100%, -130%);
+
+            }
+
+
+            .tp9s-chart-hovering .tp9s-chart-tooltip {
+
+                opacity: 1;
+
+            }
+
         `;
 
         document.head.appendChild(style);
@@ -6825,6 +7291,56 @@ dashboardButton.style.visibility =
         // reconstruit à chaque rendu, on écoute donc au niveau du
         // conteneur persistant plutôt que sur chaque élément.
         statsDashboard.addEventListener('click', function (event) {
+
+            var rangeBtn = event.target.closest('.tp9s-chart-range-btn');
+
+            if (rangeBtn) {
+
+                var newRange = rangeBtn.getAttribute('data-range');
+
+                if (newRange === statsWatchChartRange) {
+                    return;
+                }
+
+                statsWatchChartRange = newRange;
+
+                // Ne redessine QUE le graphique (pas tout l'onglet
+                // Vue d'ensemble) : sinon le scroll saute et les
+                // autres cartes se ré-animent à chaque changement
+                // de période.
+                var panel = rangeBtn.closest('.tp9s-panel');
+
+                if (panel) {
+
+                    panel.querySelectorAll('.tp9s-chart-range-btn').forEach(function (btn) {
+
+                        btn.classList.toggle(
+                            'tp9s-chart-range-active',
+                            btn === rangeBtn
+                        );
+
+                    });
+
+                    renderWatchTimeChartSVG(panel.querySelector('.tp9s-chart-canvas'));
+
+                    var subEl = panel.querySelector('.tp9s-panel-sub');
+
+                    if (subEl) {
+
+                        var newTotal = getWatchTimeBuckets(statsWatchChartRange).reduce(
+                            function (acc, b) { return acc + b.ms; },
+                            0
+                        );
+
+                        subEl.textContent = formatDuration(newTotal) + ' cumulées sur la période';
+
+                    }
+
+                }
+
+                return;
+
+            }
 
             var msgBtn = event.target.closest('.tp9s-msg-count');
 
@@ -7225,6 +7741,456 @@ dashboardButton.style.visibility =
 
     }
 
+    // ------------------------------------------------------------
+    // GRAPHIQUE "TEMPS DE VISIONNAGE PAR JOUR"
+    // ------------------------------------------------------------
+
+    var MONTH_LABELS = ['Jan', 'Fév', 'Mar', 'Avr', 'Mai', 'Juin', 'Juil', 'Août', 'Sep', 'Oct', 'Nov', 'Déc'];
+
+    var STATS_WATCH_RANGES = [
+        { id: '7', label: '7 jours' },
+        { id: '30', label: '30 jours' },
+        { id: '365', label: '1 an' }
+    ];
+
+    var statsWatchChartRange = '7';
+
+    // range '365' regroupe par mois (12 barres), sinon un point par
+    // jour (7 ou 30 barres) — sur 1 an, une barre par jour serait
+    // illisible et de toute façon on ne conserve pas plus de 370
+    // jours d'historique (voir pruneDailyWatchTime).
+    function getWatchTimeBuckets(range) {
+
+        var now = new Date();
+
+        if (range === '365') {
+
+            var monthBuckets = [];
+
+            for (var m = 11; m >= 0; m--) {
+
+                var d = new Date(now.getFullYear(), now.getMonth() - m, 1);
+
+                var monthPrefix = d.getFullYear() + '-' + pad2(d.getMonth() + 1);
+
+                var sum = 0;
+
+                Object.keys(pageStats.dailyWatchTime).forEach(function (key) {
+
+                    if (key.indexOf(monthPrefix) === 0) {
+                        sum += pageStats.dailyWatchTime[key];
+                    }
+
+                });
+
+                monthBuckets.push({
+                    label: MONTH_LABELS[d.getMonth()],
+                    ms: sum
+                });
+
+            }
+
+            return monthBuckets;
+
+        }
+
+        var days = parseInt(range, 10);
+
+        var dayBuckets = [];
+
+        for (var i = days - 1; i >= 0; i--) {
+
+            var day = new Date(now);
+
+            day.setDate(day.getDate() - i);
+
+            dayBuckets.push({
+                label: day.getDate() + '/' + (day.getMonth() + 1),
+                ms: pageStats.dailyWatchTime[dateKeyFor(day)] || 0
+            });
+
+        }
+
+        return dayBuckets;
+
+    }
+
+    function buildWatchTimeChartHTML() {
+
+        var buckets = getWatchTimeBuckets(statsWatchChartRange);
+
+        var rangeButtons = STATS_WATCH_RANGES.map(function (r) {
+
+            return (
+                '<button type="button" class="tp9s-chart-range-btn' +
+                    (r.id === statsWatchChartRange ? ' tp9s-chart-range-active' : '') +
+                    '" data-range="' + r.id + '">' + escapeHTML(r.label) + '</button>'
+            );
+
+        }).join('');
+
+        var total = buckets.reduce(function (acc, b) {
+            return acc + b.ms;
+        }, 0);
+
+        return (
+            '<div class="tp9s-panel">' +
+                '<div class="tp9s-panel-title-row">' +
+                    '<div>' +
+                        '<div class="tp9s-panel-title">Temps de visionnage</div>' +
+                        '<div class="tp9s-panel-sub">' +
+                            escapeHTML(formatDuration(total)) + ' cumulées sur la période' +
+                        '</div>' +
+                    '</div>' +
+                    '<div class="tp9s-chart-range">' + rangeButtons + '</div>' +
+                '</div>' +
+                '<div class="tp9s-chart-canvas"></div>' +
+            '</div>'
+        );
+
+    }
+
+    // Spline cubique monotone (Hermite + correction Fritsch-Carlson,
+    // la méthode utilisée par D3 "curveMonotoneX") plutôt qu'un
+    // Catmull-Rom classique : donne l'effet "vague" demandé, MAIS
+    // sans le défaut d'un Catmull-Rom simple, qui calcule chaque
+    // tangente à partir des points voisins et peut donc faire
+    // dépasser la courbe sous/au-dessus des valeurs réelles — par
+    // exemple deux points à 0 juste avant une forte remontée se
+    // retrouvaient reliés par un creux sous la ligne de base, alors
+    // que la valeur ne descend jamais sous 0 entre ces deux points.
+    // La version monotone garantit que la courbe reste toujours
+    // comprise entre les valeurs des points qu'elle relie.
+    function buildSmoothPath(points) {
+
+        var n = points.length;
+
+        if (n < 2) {
+
+            return n === 1
+                ? 'M' + points[0].x + ',' + points[0].y
+                : '';
+
+        }
+
+        var dx = [];
+        var dy = [];
+        var slope = [];
+
+        for (var i = 0; i < n - 1; i++) {
+
+            dx[i] = points[i + 1].x - points[i].x;
+            dy[i] = points[i + 1].y - points[i].y;
+            slope[i] = dx[i] !== 0 ? dy[i] / dx[i] : 0;
+
+        }
+
+        var tangent = new Array(n);
+
+        tangent[0] = slope[0];
+        tangent[n - 1] = slope[n - 2];
+
+        for (var i = 1; i < n - 1; i++) {
+
+            var left = slope[i - 1];
+            var right = slope[i];
+
+            // Segment plat, ou changement de sens (pic/creux local) :
+            // tangente nulle pour éviter tout dépassement autour de
+            // ce point.
+            if (left === 0 || right === 0 || (left < 0) !== (right < 0)) {
+                tangent[i] = 0;
+            } else {
+                tangent[i] = (left + right) / 2;
+            }
+
+        }
+
+        // Correction Fritsch-Carlson : ramène les tangentes dans la
+        // zone où le segment reste monotone (ne dépasse pas y[i] ni
+        // y[i+1]) sur chaque intervalle.
+        for (var i = 0; i < n - 1; i++) {
+
+            if (slope[i] === 0) {
+
+                tangent[i] = 0;
+                tangent[i + 1] = 0;
+
+                continue;
+
+            }
+
+            var a = tangent[i] / slope[i];
+            var b = tangent[i + 1] / slope[i];
+            var h = Math.sqrt(a * a + b * b);
+
+            if (h > 3) {
+
+                var tau = 3 / h;
+
+                tangent[i] = tau * a * slope[i];
+                tangent[i + 1] = tau * b * slope[i];
+
+            }
+
+        }
+
+        var d = 'M' + points[0].x + ',' + points[0].y;
+
+        for (var i = 0; i < n - 1; i++) {
+
+            var p0 = points[i];
+            var p1 = points[i + 1];
+
+            var cp1x = p0.x + dx[i] / 3;
+            var cp1y = p0.y + (tangent[i] * dx[i]) / 3;
+            var cp2x = p1.x - dx[i] / 3;
+            var cp2y = p1.y - (tangent[i + 1] * dx[i]) / 3;
+
+            d += ' C' + cp1x + ',' + cp1y + ' ' + cp2x + ',' + cp2y + ' ' + p1.x + ',' + p1.y;
+
+        }
+
+        return d;
+
+    }
+
+    var CHART_HEIGHT = 160;
+    var CHART_PAD_X = 8;
+    var CHART_PAD_TOP = 16;
+
+    // Redessine le graphique quand la largeur du conteneur change
+    // (redimensionnement de fenêtre, ouverture/fermeture de la
+    // sidebar, ...) : indispensable maintenant que le viewBox est
+    // calé sur cette largeur — sans ça il resterait figé sur la
+    // largeur du tout premier rendu. Un seul observer par conteneur
+    // (il persiste même quand son contenu est reconstruit par
+    // innerHTML à chaque changement de période).
+    function attachChartResizeObserver(container) {
+
+        if (
+            container.__tp9ChartObserved ||
+            typeof ResizeObserver === 'undefined'
+        ) {
+            return;
+        }
+
+        container.__tp9ChartObserved = true;
+
+        var lastWidth = container.clientWidth;
+
+        var observer = new ResizeObserver(function () {
+
+            var width = container.clientWidth;
+
+            if (width && width !== lastWidth) {
+
+                lastWidth = width;
+
+                renderWatchTimeChartSVG(container);
+
+            }
+
+        });
+
+        observer.observe(container);
+
+    }
+
+    // Dessine le graphique en aire lissée directement en SVG (pas de
+    // lib externe) et branche le survol souris/tactile pour la
+    // tooltip — impossible à faire en pur innerHTML statique, donc
+    // appelé juste après avoir inséré le conteneur dans le DOM.
+    //
+    // Le viewBox est calé sur la largeur RENDUE du conteneur (et non
+    // sur une largeur logique fixe étirée via preserveAspectRatio=
+    // "none") : sinon le repère x/y n'est plus carré, et tout ce qui
+    // dépend de l'espace utilisateur SVG — stroke-width, le rayon du
+    // point au survol, le filtre drop-shadow, le texte des axes — se
+    // retrouve déformé/flou de façon non uniforme (cercle qui devient
+    // une ellipse, texte étiré, halo pixelisé).
+    function renderWatchTimeChartSVG(container) {
+
+        if (!container) {
+            return;
+        }
+
+        var chartWidth = Math.round(container.clientWidth || 0);
+
+        if (!chartWidth) {
+
+            // Conteneur pas encore mis en page (ex: premier rendu
+            // avant que le navigateur n'ait calculé les tailles) :
+            // on retente une frame plus tard plutôt que de dessiner
+            // avec une largeur bidon qui serait de toute façon fausse.
+            requestAnimationFrame(function () {
+                renderWatchTimeChartSVG(container);
+            });
+
+            return;
+
+        }
+
+        attachChartResizeObserver(container);
+
+        var buckets = getWatchTimeBuckets(statsWatchChartRange);
+
+        var showLabels = buckets.length <= 12;
+
+        var bottomPad = showLabels ? 22 : 10;
+
+        var innerW = chartWidth - CHART_PAD_X * 2;
+        var innerH = CHART_HEIGHT - CHART_PAD_TOP - bottomPad;
+
+        var max = buckets.reduce(function (acc, b) {
+            return Math.max(acc, b.ms);
+        }, 0);
+
+        var safeMax = max || 1;
+
+        if (!buckets.length) {
+
+            container.innerHTML = '<div class="tp9s-empty">Aucune donnée.</div>';
+
+            return;
+
+        }
+
+        var points = buckets.map(function (b, i) {
+
+            var x = buckets.length > 1
+                ? CHART_PAD_X + (innerW * i) / (buckets.length - 1)
+                : CHART_PAD_X + innerW / 2;
+
+            var y = CHART_PAD_TOP + innerH - (b.ms / safeMax) * innerH;
+
+            return { x: x, y: y, ms: b.ms, label: b.label };
+
+        });
+
+        var linePath = buildSmoothPath(points);
+
+        var baseline = CHART_PAD_TOP + innerH;
+
+        var areaPath =
+            linePath +
+            ' L' + points[points.length - 1].x + ',' + baseline +
+            ' L' + points[0].x + ',' + baseline +
+            ' Z';
+
+        var labelsSVG = showLabels
+            ? points.map(function (p) {
+                return (
+                    '<text x="' + p.x + '" y="' + (CHART_HEIGHT - 6) +
+                    '" class="tp9s-chart-axis-label" text-anchor="middle">' +
+                    escapeHTML(p.label) + '</text>'
+                );
+            }).join('')
+            : '';
+
+        container.innerHTML =
+            '<svg class="tp9s-chart-svg" viewBox="0 0 ' + chartWidth + ' ' + CHART_HEIGHT + '">' +
+                '<defs>' +
+                    '<linearGradient id="tp9sChartFill" x1="0" y1="0" x2="0" y2="1">' +
+                        '<stop offset="0%" stop-color="#9147ff" stop-opacity="0.5"/>' +
+                        '<stop offset="100%" stop-color="#9147ff" stop-opacity="0"/>' +
+                    '</linearGradient>' +
+                    '<linearGradient id="tp9sChartStroke" x1="0" y1="0" x2="1" y2="0">' +
+                        '<stop offset="0%" stop-color="#bf94ff"/>' +
+                        '<stop offset="100%" stop-color="#9147ff"/>' +
+                    '</linearGradient>' +
+                '</defs>' +
+                '<path class="tp9s-chart-area" d="' + areaPath + '"></path>' +
+                '<path class="tp9s-chart-line" d="' + linePath + '"></path>' +
+                labelsSVG +
+                '<g class="tp9s-chart-hover">' +
+                    '<line class="tp9s-chart-hover-line" x1="0" y1="' + CHART_PAD_TOP + '" x2="0" y2="' + baseline + '"></line>' +
+                    '<circle class="tp9s-chart-hover-dot" r="4"></circle>' +
+                '</g>' +
+            '</svg>' +
+            '<div class="tp9s-chart-tooltip"></div>';
+
+        var svg = container.querySelector('.tp9s-chart-svg');
+        var hoverGroup = container.querySelector('.tp9s-chart-hover');
+        var hoverLine = container.querySelector('.tp9s-chart-hover-line');
+        var hoverDot = container.querySelector('.tp9s-chart-hover-dot');
+        var tooltip = container.querySelector('.tp9s-chart-tooltip');
+
+        // Le viewBox correspond exactement à la taille rendue du SVG
+        // (mesurée plus haut) : un simple ratio position-souris /
+        // taille-rendue, multiplié par cette même largeur, retombe
+        // donc directement sur les coordonnées utilisées pour les
+        // points, sans aucune distorsion x/y à compenser.
+        function handleMove(clientX, clientY) {
+
+            var rect = svg.getBoundingClientRect();
+
+            if (!rect.width) {
+                return;
+            }
+
+            var relX = ((clientX - rect.left) / rect.width) * chartWidth;
+
+            var nearestIndex = 0;
+            var nearestDist = Infinity;
+
+            points.forEach(function (p, i) {
+
+                var dist = Math.abs(p.x - relX);
+
+                if (dist < nearestDist) {
+                    nearestDist = dist;
+                    nearestIndex = i;
+                }
+
+            });
+
+            var point = points[nearestIndex];
+
+            container.classList.add('tp9s-chart-hovering');
+
+            hoverLine.setAttribute('x1', point.x);
+            hoverLine.setAttribute('x2', point.x);
+
+            hoverDot.setAttribute('cx', point.x);
+            hoverDot.setAttribute('cy', point.y);
+
+            tooltip.textContent = point.label + ' · ' + formatDuration(point.ms);
+
+            var tooltipLeftPct = (point.x / chartWidth) * 100;
+            var tooltipTopPct = (point.y / CHART_HEIGHT) * 100;
+
+            tooltip.style.left = tooltipLeftPct + '%';
+            tooltip.style.top = tooltipTopPct + '%';
+
+            tooltip.classList.toggle('tp9s-chart-tooltip-left', tooltipLeftPct > 60);
+
+        }
+
+        function handleLeave() {
+
+            container.classList.remove('tp9s-chart-hovering');
+
+        }
+
+        svg.addEventListener('mousemove', function (event) {
+            handleMove(event.clientX, event.clientY);
+        });
+
+        svg.addEventListener('mouseleave', handleLeave);
+
+        svg.addEventListener('touchmove', function (event) {
+
+            if (event.touches && event.touches[0]) {
+                handleMove(event.touches[0].clientX, event.touches[0].clientY);
+            }
+
+        }, { passive: true });
+
+        svg.addEventListener('touchend', handleLeave);
+
+    }
+
     function renderStatsOverview(content) {
 
         var ranking = getProxyRanking24h();
@@ -7346,7 +8312,7 @@ dashboardButton.style.visibility =
 
         ].join('');
 
-        var top = ranking.slice(0, 8);
+        var top = ranking.slice(0, 3);
 
         var medals = ['🥇', '🥈', '🥉'];
 
@@ -7395,9 +8361,13 @@ dashboardButton.style.visibility =
                 </div>
             </div>
 
+            ${buildWatchTimeChartHTML()}
+
             <div class="tp9s-cards tp9s-cards-secondary">${secondaryCards}</div>
 
         `;
+
+        renderWatchTimeChartSVG(content.querySelector('.tp9s-chart-canvas'));
 
     }
 
