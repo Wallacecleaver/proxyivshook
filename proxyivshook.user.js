@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch HLS Proxy
 // @namespace    twitch-proxy-ivs
-// @version      1.4.1
+// @version      1.4.2
 // @author       razeNFR
 // @description  Twitch HLS via plusieurs proxys - Dashboard statistiques (nouvel onglet, design amélioré) + fallback automatique + résultats persistants + proxys personnalisés
 // @match        https://www.twitch.tv/*
@@ -24,7 +24,7 @@
     var UPDATE_CHECK_KEY = 'twitchProxyUpdateCheckV1';
 
     // Doit être tenu à jour avec le @version de l'en-tête du script.
-    var CURRENT_VERSION = '1.4.1';
+    var CURRENT_VERSION = '1.4.2';
 
     // Même URL que @updateURL : contient toujours la dernière version
     // publiée. On la relit nous-même (plutôt que de compter sur le
@@ -811,6 +811,7 @@
             streamers: {},
             logs: [],
             dailyWatchTime: {},
+            hourlyWatchTime: {},
             totals: {
                 chatMessagesGlobal: 0,
                 bandwidthBytesGlobal: 0,
@@ -841,6 +842,7 @@
                     stats.streamers = parsed.streamers || {};
                     stats.logs = Array.isArray(parsed.logs) ? parsed.logs : [];
                     stats.dailyWatchTime = parsed.dailyWatchTime || {};
+                    stats.hourlyWatchTime = parsed.hourlyWatchTime || {};
 
                     stats.totals = Object.assign(
                         defaultStats().totals,
@@ -1234,7 +1236,8 @@
                 avgLatency: avgLatency,
                 testCount: recentAll.length,
                 successRate: successRate,
-                usage: pageStats.proxyUsage[proxy.id] || 0
+                usage: pageStats.proxyUsage[proxy.id] || 0,
+                bandwidth: pageStats.bandwidthByProxy[proxy.id] || 0
             };
 
         }).sort(function (a, b) {
@@ -1478,7 +1481,38 @@
         return date.getFullYear() + '-' + pad2(date.getMonth() + 1) + '-' + pad2(date.getDate());
     }
 
+    // Clé par HEURE (contrairement à dateKeyFor qui regroupe par
+    // jour) : sert uniquement au filtre "24h" du graphique, qui a
+    // besoin d'un point par heure plutôt qu'un seul total par jour.
+    function hourKeyFor(date) {
+        return dateKeyFor(date) + '-' + pad2(date.getHours());
+    }
+
     var DAILY_WATCH_HISTORY_DAYS = 370;
+
+    // Fenêtre glissante de 24h + marge : 48h suffisent, pas besoin
+    // de garder plus de granularité horaire que ça.
+    var HOURLY_WATCH_HISTORY_HOURS = 48;
+
+    // Les clés "YYYY-MM-DD-HH" se comparent aussi lexicographiquement
+    // comme des dates (même principe que pruneDailyWatchTime).
+    function pruneHourlyWatchTime() {
+
+        var cutoff = new Date();
+
+        cutoff.setHours(cutoff.getHours() - HOURLY_WATCH_HISTORY_HOURS);
+
+        var cutoffKey = hourKeyFor(cutoff);
+
+        Object.keys(pageStats.hourlyWatchTime).forEach(function (key) {
+
+            if (key < cutoffKey) {
+                delete pageStats.hourlyWatchTime[key];
+            }
+
+        });
+
+    }
 
     // Les clés "YYYY-MM-DD" se comparent lexicographiquement comme
     // des dates, pas besoin de les reparser pour trouver les vieilles
@@ -1528,12 +1562,21 @@
         pageStats.totals.watchTimeMsGlobal += BANDWIDTH_TICK_MS;
         pageStats.totals.bandwidthBytesGlobal += bytes;
 
-        var dayKey = dateKeyFor(new Date());
+        var now2 = new Date();
+
+        var dayKey = dateKeyFor(now2);
 
         pageStats.dailyWatchTime[dayKey] =
             (pageStats.dailyWatchTime[dayKey] || 0) + BANDWIDTH_TICK_MS;
 
         pruneDailyWatchTime();
+
+        var hourKey = hourKeyFor(now2);
+
+        pageStats.hourlyWatchTime[hourKey] =
+            (pageStats.hourlyWatchTime[hourKey] || 0) + BANDWIDTH_TICK_MS;
+
+        pruneHourlyWatchTime();
 
         if (
             activeProxyInfo &&
@@ -6142,7 +6185,7 @@ dashboardButton.style.visibility =
 
                 display: grid;
 
-                grid-template-columns: 1.4fr 1fr 1fr 1fr 1.2fr;
+                grid-template-columns: 34px 1.4fr 1fr 1fr 1fr 1.2fr;
 
                 gap: 8px;
 
@@ -6159,7 +6202,58 @@ dashboardButton.style.visibility =
 
             .tp9s-table-row-relais {
 
-                grid-template-columns: 1.4fr 1fr 1fr 1fr 1fr 1.2fr;
+                grid-template-columns: 34px 1.4fr 1fr 1fr 1fr 1fr 1.2fr;
+
+            }
+
+
+            .tp9s-td-rank {
+
+                text-align: center;
+
+                font-size: 13px;
+
+                font-weight: 700;
+
+                color: #777;
+
+            }
+
+
+            .tp9s-sortable {
+
+                cursor: pointer;
+
+                user-select: none;
+
+                display: flex;
+
+                align-items: center;
+
+                gap: 4px;
+
+                transition: color .12s ease;
+
+            }
+
+
+            .tp9s-sortable:hover {
+
+                color: #ddd;
+
+            }
+
+
+            .tp9s-sort-active {
+
+                color: #bf94ff;
+
+            }
+
+
+            .tp9s-sort-arrow {
+
+                font-size: 8px;
 
             }
 
@@ -7342,6 +7436,25 @@ dashboardButton.style.visibility =
 
             }
 
+            var sortHeader = event.target.closest('[data-sort-key]');
+
+            if (sortHeader) {
+
+                var sortTable = sortHeader.getAttribute('data-sort-table');
+                var sortKeyClicked = sortHeader.getAttribute('data-sort-key');
+
+                toggleSort(sortTable, sortKeyClicked);
+
+                if (sortTable === 'relais') {
+                    renderStatsRelais(statsDashboard.querySelector('.tp9s-content'));
+                } else if (sortTable === 'streamers') {
+                    renderStatsStreamers(statsDashboard.querySelector('.tp9s-content'));
+                }
+
+                return;
+
+            }
+
             var msgBtn = event.target.closest('.tp9s-msg-count');
 
             if (msgBtn) {
@@ -7748,20 +7861,42 @@ dashboardButton.style.visibility =
     var MONTH_LABELS = ['Jan', 'Fév', 'Mar', 'Avr', 'Mai', 'Juin', 'Juil', 'Août', 'Sep', 'Oct', 'Nov', 'Déc'];
 
     var STATS_WATCH_RANGES = [
+        { id: '24h', label: '24h' },
         { id: '7', label: '7 jours' },
         { id: '30', label: '30 jours' },
         { id: '365', label: '1 an' }
     ];
 
-    var statsWatchChartRange = '7';
+    var statsWatchChartRange = '24h';
 
-    // range '365' regroupe par mois (12 barres), sinon un point par
-    // jour (7 ou 30 barres) — sur 1 an, une barre par jour serait
+    // range '24h' = fenêtre glissante des dernières 24 heures, un
+    // point par heure (voir hourlyWatchTime / hourKeyFor). range
+    // '365' regroupe par mois (12 barres), sinon un point par jour
+    // (7 ou 30 barres) — sur 1 an, une barre par jour serait
     // illisible et de toute façon on ne conserve pas plus de 370
     // jours d'historique (voir pruneDailyWatchTime).
     function getWatchTimeBuckets(range) {
 
         var now = new Date();
+
+        if (range === '24h') {
+
+            var hourBuckets = [];
+
+            for (var h = 23; h >= 0; h--) {
+
+                var hourDate = new Date(now.getTime() - h * 60 * 60 * 1000);
+
+                hourBuckets.push({
+                    label: pad2(hourDate.getHours()) + 'h',
+                    ms: pageStats.hourlyWatchTime[hourKeyFor(hourDate)] || 0
+                });
+
+            }
+
+            return hourBuckets;
+
+        }
 
         if (range === '365') {
 
@@ -8395,16 +8530,119 @@ dashboardButton.style.visibility =
 
     }
 
+    // ------------------------------------------------------------
+    // TRI DES TABLEAUX "RELAIS" / "STREAMERS" (en-têtes cliquables)
+    // ------------------------------------------------------------
+
+    // Direction appliquée par défaut au premier clic sur une colonne
+    // (avant ça, elle bascule juste asc<->desc sur re-clic) : pour
+    // la latence, "petit = bon" donc croissant ; pour tout le reste
+    // (réussite, tests, usage, bande passante, temps regardé,
+    // messages), "grand = intéressant" donc décroissant.
+    var RELAIS_SORT_DEFAULT_DIR = {
+        avgLatency: 'asc',
+        successRate: 'desc',
+        testCount: 'desc',
+        usage: 'desc',
+        bandwidth: 'desc'
+    };
+
+    var STREAMERS_SORT_DEFAULT_DIR = {
+        watchTimeMs: 'desc',
+        chatMessages: 'desc',
+        bandwidthBytes: 'desc'
+    };
+
+    var statsRelaisSortKey = 'avgLatency';
+    var statsRelaisSortDir = 'asc';
+
+    var statsStreamersSortKey = 'watchTimeMs';
+    var statsStreamersSortDir = 'desc';
+
+    var SORT_RANK_MEDALS = ['🥇', '🥈', '🥉'];
+
+    function sortRankHTML(index) {
+        return SORT_RANK_MEDALS[index] || ('#' + (index + 1));
+    }
+
+    // En-tête de colonne cliquable, avec petite flèche indiquant le
+    // sens quand c'est la colonne triée actuellement.
+    function sortableHeaderHTML(label, table, key, activeKey, activeDir) {
+
+        var isActive = key === activeKey;
+
+        var arrow = isActive
+            ? '<span class="tp9s-sort-arrow">' + (activeDir === 'asc' ? '▲' : '▼') + '</span>'
+            : '';
+
+        return (
+            '<div class="tp9s-td tp9s-sortable' + (isActive ? ' tp9s-sort-active' : '') + '"' +
+                ' data-sort-table="' + table + '" data-sort-key="' + key + '">' +
+                escapeHTML(label) + arrow +
+            '</div>'
+        );
+
+    }
+
+    // Bascule asc/desc si on re-clique la colonne déjà triée, sinon
+    // adopte la direction par défaut de la nouvelle colonne.
+    function toggleSort(table, key) {
+
+        if (table === 'relais') {
+
+            if (statsRelaisSortKey === key) {
+                statsRelaisSortDir = statsRelaisSortDir === 'asc' ? 'desc' : 'asc';
+            } else {
+                statsRelaisSortKey = key;
+                statsRelaisSortDir = RELAIS_SORT_DEFAULT_DIR[key] || 'desc';
+            }
+
+        } else if (table === 'streamers') {
+
+            if (statsStreamersSortKey === key) {
+                statsStreamersSortDir = statsStreamersSortDir === 'asc' ? 'desc' : 'asc';
+            } else {
+                statsStreamersSortKey = key;
+                statsStreamersSortDir = STREAMERS_SORT_DEFAULT_DIR[key] || 'desc';
+            }
+
+        }
+
+    }
+
     function renderStatsRelais(content) {
 
         var ranking = getProxyRanking24h();
 
-        var rows = ranking.map(function (p) {
+        // getProxyRanking24h() renvoie déjà les relais triés par
+        // latence croissante (utilisé tel quel par le podium de la
+        // Vue d'ensemble) : on re-trie une copie selon la colonne
+        // actuellement sélectionnée dans CE tableau, sans affecter
+        // ce classement partagé. null (jamais testé) reste toujours
+        // en fin de liste, quel que soit le sens du tri.
+        var key = statsRelaisSortKey;
+        var dir = statsRelaisSortDir;
+
+        var sorted = ranking.slice().sort(function (a, b) {
+
+            var av = a[key];
+            var bv = b[key];
+
+            if (av === null && bv === null) return 0;
+            if (av === null) return 1;
+            if (bv === null) return -1;
+
+            return dir === 'asc' ? av - bv : bv - av;
+
+        });
+
+        var rows = sorted.map(function (p, index) {
 
             var rateCls = successRateClass(p.successRate);
 
             return (
                 '<div class="tp9s-table-row tp9s-table-row-relais">' +
+                    '<div class="tp9s-td tp9s-td-rank">' + sortRankHTML(index) + '</div>' +
                     '<div class="tp9s-td tp9s-td-name-flex">' +
                         '<div class="tp9s-avatar">' + initialLetter(p.name) + '</div>' +
                         '<span>' + escapeHTML(p.name) + '</span>' +
@@ -8424,7 +8662,7 @@ dashboardButton.style.visibility =
                     '<div class="tp9s-td">' + p.testCount + '</div>' +
                     '<div class="tp9s-td">' + p.usage + '</div>' +
                     '<div class="tp9s-td">' +
-                        formatBytes(pageStats.bandwidthByProxy[p.id] || 0) +
+                        formatBytes(p.bandwidth) +
                     '</div>' +
                 '</div>'
             );
@@ -8435,16 +8673,17 @@ dashboardButton.style.visibility =
 
             <div class="tp9s-panel">
                 <div class="tp9s-panel-title">Classement des relais</div>
-                <div class="tp9s-panel-sub">Latence moyenne et fiabilité sur les 7 derniers jours</div>
+                <div class="tp9s-panel-sub">Latence moyenne et fiabilité sur les 7 derniers jours · clique un en-tête pour trier</div>
 
                 <div class="tp9s-table">
                     <div class="tp9s-table-row tp9s-table-row-relais tp9s-table-head">
+                        <div class="tp9s-td"></div>
                         <div class="tp9s-td tp9s-td-name">Proxy</div>
-                        <div class="tp9s-td">Latence 7j</div>
-                        <div class="tp9s-td">Réussite</div>
-                        <div class="tp9s-td">Tests 7j</div>
-                        <div class="tp9s-td">Utilisations</div>
-                        <div class="tp9s-td">Bande passante (total)</div>
+                        ${sortableHeaderHTML('Latence 7j', 'relais', 'avgLatency', key, dir)}
+                        ${sortableHeaderHTML('Réussite', 'relais', 'successRate', key, dir)}
+                        ${sortableHeaderHTML('Tests 7j', 'relais', 'testCount', key, dir)}
+                        ${sortableHeaderHTML('Utilisations', 'relais', 'usage', key, dir)}
+                        ${sortableHeaderHTML('Bande passante (total)', 'relais', 'bandwidth', key, dir)}
                     </div>
                     ${
                         rows ||
@@ -8461,12 +8700,15 @@ dashboardButton.style.visibility =
 
         var channels = Object.keys(pageStats.streamers);
 
+        var key = statsStreamersSortKey;
+        var dir = statsStreamersSortDir;
+
         channels.sort(function (a, b) {
 
-            return (
-                pageStats.streamers[b].watchTimeMs -
-                pageStats.streamers[a].watchTimeMs
-            );
+            var av = pageStats.streamers[a][key] || 0;
+            var bv = pageStats.streamers[b][key] || 0;
+
+            return dir === 'asc' ? av - bv : bv - av;
 
         });
 
@@ -8521,6 +8763,7 @@ dashboardButton.style.visibility =
 
             return (
                 '<div class="tp9s-table-row">' +
+                    '<div class="tp9s-td tp9s-td-rank">' + sortRankHTML(index) + '</div>' +
                     '<div class="tp9s-td tp9s-td-name-flex">' +
                         avatarHTML +
                         '<span>' + escapeHTML(displayName) + '</span>' +
@@ -8554,15 +8797,16 @@ dashboardButton.style.visibility =
                 <div class="tp9s-panel-title">Streamers suivis</div>
                 <div class="tp9s-panel-sub">
                     Temps de visionnage, tes messages tchat et bande passante par streamer ·
-                    clique sur le nombre de messages pour voir l'historique
+                    clique un en-tête pour trier, ou sur le nombre de messages pour voir l'historique
                 </div>
 
                 <div class="tp9s-table">
                     <div class="tp9s-table-row tp9s-table-head">
+                        <div class="tp9s-td"></div>
                         <div class="tp9s-td tp9s-td-name">Streamer</div>
-                        <div class="tp9s-td">Temps regardé</div>
-                        <div class="tp9s-td">Tes messages</div>
-                        <div class="tp9s-td">Bande passante (total)</div>
+                        ${sortableHeaderHTML('Temps regardé', 'streamers', 'watchTimeMs', key, dir)}
+                        ${sortableHeaderHTML('Tes messages', 'streamers', 'chatMessages', key, dir)}
+                        ${sortableHeaderHTML('Bande passante (total)', 'streamers', 'bandwidthBytes', key, dir)}
                         <div class="tp9s-td">Proxy principal</div>
                     </div>
                     ${
