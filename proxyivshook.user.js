@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch HLS Proxy
 // @namespace    twitch-proxy-ivs
-// @version      1.4.2
+// @version      1.4.3
 // @author       razeNFR
 // @description  Twitch HLS via plusieurs proxys - Dashboard statistiques (nouvel onglet, design amélioré) + fallback automatique + résultats persistants + proxys personnalisés
 // @match        https://www.twitch.tv/*
@@ -24,7 +24,7 @@
     var UPDATE_CHECK_KEY = 'twitchProxyUpdateCheckV1';
 
     // Doit être tenu à jour avec le @version de l'en-tête du script.
-    var CURRENT_VERSION = '1.4.2';
+    var CURRENT_VERSION = '1.4.3';
 
     // Même URL que @updateURL : contient toujours la dernière version
     // publiée. On la relit nous-même (plutôt que de compter sur le
@@ -7859,6 +7859,8 @@ dashboardButton.style.visibility =
     // ------------------------------------------------------------
 
     var MONTH_LABELS = ['Jan', 'Fév', 'Mar', 'Avr', 'Mai', 'Juin', 'Juil', 'Août', 'Sep', 'Oct', 'Nov', 'Déc'];
+    var MONTH_LABELS_ABBR_DOT = ['Janv.', 'Févr.', 'Mars', 'Avr.', 'Mai', 'Juin', 'Juil.', 'Août', 'Sept.', 'Oct.', 'Nov.', 'Déc.'];
+    var DAY_LABELS_FULL = ['Dimanche', 'Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi'];
 
     var STATS_WATCH_RANGES = [
         { id: '24h', label: '24h' },
@@ -7939,8 +7941,16 @@ dashboardButton.style.visibility =
 
             day.setDate(day.getDate() - i);
 
+            var dayLabel;
+
+            if (range === '7') {
+                dayLabel = DAY_LABELS_FULL[day.getDay()];
+            } else {
+                dayLabel = day.getDate() + ' ' + MONTH_LABELS_ABBR_DOT[day.getMonth()];
+            }
+
             dayBuckets.push({
-                label: day.getDate() + '/' + (day.getMonth() + 1),
+                label: dayLabel,
                 ms: pageStats.dailyWatchTime[dateKeyFor(day)] || 0
             });
 
@@ -8170,7 +8180,7 @@ dashboardButton.style.visibility =
 
         var buckets = getWatchTimeBuckets(statsWatchChartRange);
 
-        var showLabels = buckets.length <= 12;
+        var showLabels = true;
 
         var bottomPad = showLabels ? 22 : 10;
 
