@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch HLS Proxy
 // @namespace    twitch-proxy-ivs
-// @version      1.4.3
+// @version      1.5.0
 // @author       razeNFR
 // @description  Twitch HLS via plusieurs proxys - Dashboard statistiques (nouvel onglet, design amélioré) + fallback automatique + résultats persistants + proxys personnalisés
 // @match        https://www.twitch.tv/*
@@ -19,12 +19,20 @@
     // ============================================================
 
     var STORAGE_KEY = 'twitchProxyManagerV1';
-    var CHANNEL_CACHE_KEY = 'twitchProxyLastChannelV1';
     var STATS_KEY = 'twitchProxyStatsV1';
     var UPDATE_CHECK_KEY = 'twitchProxyUpdateCheckV1';
 
+    // Identifiant unique de CET onglet. Le BroadcastChannel est
+    // partagé par tous les onglets twitch.tv : sans ça, les octets
+    // mesurés par le Worker d'un onglet seraient aussi comptés par
+    // les autres onglets ouverts sur la même chaîne.
+    var TAB_ID =
+        Date.now().toString(36) +
+        '-' +
+        Math.random().toString(36).substring(2, 9);
+
     // Doit être tenu à jour avec le @version de l'en-tête du script.
-    var CURRENT_VERSION = '1.4.3';
+    var CURRENT_VERSION = '1.5.0';
 
     // Même URL que @updateURL : contient toujours la dernière version
     // publiée. On la relit nous-même (plutôt que de compter sur le
@@ -159,15 +167,6 @@
     }
 
 
-    function isDefaultProxy(id) {
-
-        return DEFAULT_PROXIES.some(function (p) {
-            return p.id === id;
-        });
-
-    }
-
-
     // ------------------------------------------------------------
     // Habillage visuel des proxys (icône + couleur) dans le menu
     // ------------------------------------------------------------
@@ -227,7 +226,8 @@
             fallback: true,
             timeout: DEFAULT_TIMEOUT,
             cacheDelay: DEFAULT_CACHE_DELAY,
-            keepQualityInBackground: true
+            keepQualityInBackground: true,
+            autoBackupStats: true
         };
 
         if (!parsed || typeof parsed !== 'object') {
@@ -281,7 +281,15 @@
 
                             lastTest:
                                 savedProxy.lastTest ||
-                                null
+                                null,
+
+                            quarantine:
+                                savedProxy.quarantine ||
+                                null,
+
+                            quarantineProtectedUntil:
+                                savedProxy.quarantineProtectedUntil ||
+                                0
 
                         });
 
@@ -321,7 +329,15 @@
 
                             lastTest:
                                 savedProxy.lastTest ||
-                                null
+                                null,
+
+                            quarantine:
+                                savedProxy.quarantine ||
+                                null,
+
+                            quarantineProtectedUntil:
+                                savedProxy.quarantineProtectedUntil ||
+                                0
 
                         });
 
@@ -411,6 +427,16 @@
 
             config.keepQualityInBackground =
                 parsed.keepQualityInBackground;
+
+        }
+
+        if (
+            typeof parsed.autoBackupStats ===
+            'boolean'
+        ) {
+
+            config.autoBackupStats =
+                parsed.autoBackupStats;
 
         }
 
@@ -644,7 +670,10 @@
                     pageConfig.cacheDelay,
 
                 keepQualityInBackground:
-                    pageConfig.keepQualityInBackground
+                    pageConfig.keepQualityInBackground,
+
+                autoBackupStats:
+                    pageConfig.autoBackupStats
 
             };
 
@@ -673,8 +702,12 @@
 
             link.href = url;
 
+            // Même convention de nommage que les sauvegardes de
+            // statistiques (voir backupStampFor).
             link.download =
-                'twitch-proxy-config.json';
+                'Twitch_HLS_Proxy-Config-' +
+                backupStampFor(new Date()) +
+                '.json';
 
             document.body.appendChild(
                 link
@@ -812,6 +845,29 @@
             logs: [],
             dailyWatchTime: {},
             hourlyWatchTime: {},
+
+            // Mêmes clés que ci-dessus, mais en octets : permet au
+            // graphique d'afficher la bande passante dans le temps
+            // et pas seulement un total à vie.
+            dailyBandwidth: {},
+            hourlyBandwidth: {},
+
+            // Blocs de visionnage continus — voir
+            // recordSessionProgress().
+            sessions: [],
+
+            // Cumul par (jour de semaine, heure) : 168 cases au
+            // total, jamais purgées — c'est la base de l'onglet
+            // "Habitudes". Clé "jour-heure", ex "2-21" = mardi 21h.
+            watchHeatmap: {},
+
+            // 'network' | 'decoder' | 'estimate' : d'où viennent
+            // les octets comptabilisés. Stocké dans les stats (et
+            // pas en variable locale) pour que l'onglet dashboard,
+            // qui n'a aucune vidéo en cours, puisse quand même
+            // afficher la provenance de la mesure.
+            bandwidthSource: null,
+
             totals: {
                 chatMessagesGlobal: 0,
                 bandwidthBytesGlobal: 0,
@@ -843,6 +899,12 @@
                     stats.logs = Array.isArray(parsed.logs) ? parsed.logs : [];
                     stats.dailyWatchTime = parsed.dailyWatchTime || {};
                     stats.hourlyWatchTime = parsed.hourlyWatchTime || {};
+                    stats.dailyBandwidth = parsed.dailyBandwidth || {};
+                    stats.hourlyBandwidth = parsed.hourlyBandwidth || {};
+                    stats.sessions =
+                        Array.isArray(parsed.sessions) ? parsed.sessions : [];
+                    stats.watchHeatmap = parsed.watchHeatmap || {};
+                    stats.bandwidthSource = parsed.bandwidthSource || null;
 
                     stats.totals = Object.assign(
                         defaultStats().totals,
@@ -871,16 +933,68 @@
 
     var statsSaveTimer = null;
 
+    // Le localStorage plafonne autour de 5 Mo par origine. Une fois
+    // ce plafond atteint, l'écriture lève une exception et les stats
+    // cessent SILENCIEUSEMENT d'être sauvegardées : on le rend
+    // visible (journal + onglet Sauvegarde) plutôt que de laisser
+    // l'historique s'arrêter sans prévenir.
+    var STATS_SIZE_WARN_BYTES = 3.5 * 1024 * 1024;
+
+    var statsStorageState = { bytes: 0, full: false, warned: false };
+
     function saveStatsNow() {
 
         try {
 
-            localStorage.setItem(
-                STATS_KEY,
-                JSON.stringify(pageStats)
-            );
+            var payload = JSON.stringify(pageStats);
+
+            statsStorageState.bytes = payload.length;
+
+            localStorage.setItem(STATS_KEY, payload);
+
+            if (statsStorageState.full) {
+
+                statsStorageState.full = false;
+
+                logEvent(
+                    'success',
+                    'Sauvegarde des statistiques de nouveau possible'
+                );
+
+            }
+
+            // Averti une seule fois par session : c'est un rappel,
+            // pas une alarme à répéter toutes les deux secondes.
+            if (
+                statsStorageState.bytes > STATS_SIZE_WARN_BYTES &&
+                !statsStorageState.warned
+            ) {
+
+                statsStorageState.warned = true;
+
+                logEvent(
+                    'warn',
+                    'Les statistiques occupent ' +
+                    formatBytes(statsStorageState.bytes) +
+                    ' de stockage local : pense à les sauvegarder sur disque'
+                );
+
+            }
 
         } catch (e) {
+
+            // logEvent() replanifie une sauvegarde : sans ce garde,
+            // un stockage plein tournerait en boucle d'échecs.
+            if (!statsStorageState.full) {
+
+                statsStorageState.full = true;
+
+                logEvent(
+                    'error',
+                    'Stockage local saturé : les statistiques ne sont plus sauvegardées'
+                );
+
+            }
 
             console.warn('[TwitchProxy] Impossible de sauvegarder les stats:', e);
 
@@ -1178,11 +1292,15 @@
 
         var history = pageStats.proxyHistory[proxyId];
 
-        history.push({
+        // `r` (round) n'est posé qu'APRÈS coup, quand on sait si la
+        // salve de tests était concluante — voir applyQuarantineRules.
+        var entry = {
             t: Date.now(),
             ok: !!ok,
             latency: typeof latency === 'number' ? latency : null
-        });
+        };
+
+        history.push(entry);
 
         var cutoff = Date.now() - STATS_HISTORY_MS;
 
@@ -1194,10 +1312,210 @@
 
         scheduleStatsSave();
 
+        return entry;
+
     }
 
-    // Classement des proxys les plus rapides sur les 7 derniers
-    // jours (moyenne des latences des tests réussis).
+
+    // ============================================================
+    // QUARANTAINE DES RELAIS MORTS
+    // ============================================================
+    //
+    // Un relais qui ne répond plus JAMAIS est retiré de la course en
+    // direct pour ne pas la ralentir, mais il n'est jamais supprimé
+    // ni décoché : `quarantine` est un champ à part, la case à cocher
+    // de l'utilisateur reste la sienne.
+    //
+    // Règle centrale, et c'est tout l'intérêt : un échec ne compte
+    // contre un relais QUE si un autre relais a réussi dans la même
+    // salve de tests. Sinon, une chaîne hors ligne ou une coupure
+    // réseau ferait échouer tout le monde et mettrait toute la liste
+    // en quarantaine d'un coup.
+
+    var QUARANTINE_MIN_TESTS = 15;
+    var QUARANTINE_PROBE_INTERVAL_MS = 60 * 60 * 1000; // 1 heure
+    var QUARANTINE_PROTECT_MS = 24 * 60 * 60 * 1000;   // 24 heures
+
+    function isQuarantined(proxy) {
+
+        return !!proxy.quarantine;
+
+    }
+
+    // Relais réellement utilisables pour la lecture (ceux que le
+    // Worker met en concurrence).
+    function getRaceableProxies() {
+
+        return pageConfig.proxies.filter(function (proxy) {
+            return proxy.enabled && !isQuarantined(proxy);
+        });
+
+    }
+
+    function releaseFromQuarantine(proxy, manual) {
+
+        if (!proxy.quarantine) {
+            return;
+        }
+
+        proxy.quarantine = null;
+
+        if (manual) {
+
+            // L'utilisateur l'a rouvert lui-même : on ne le remet pas
+            // en quarantaine dans la foulée, même s'il rate encore
+            // quelques salves.
+            proxy.quarantineProtectedUntil =
+                Date.now() + QUARANTINE_PROTECT_MS;
+
+        }
+
+        logEvent(
+            'success',
+            'Relais ' + proxy.name +
+            (manual
+                ? ' sorti de quarantaine manuellement'
+                : ' de nouveau fonctionnel, sorti de quarantaine')
+        );
+
+    }
+
+    function quarantineProxy(proxy, testCount) {
+
+        proxy.quarantine = {
+            since: Date.now(),
+            lastProbe: Date.now(),
+            tests: testCount
+        };
+
+        logEvent(
+            'warn',
+            'Relais ' + proxy.name + ' mis en quarantaine (' +
+            testCount + ' échecs consécutifs sur 7 jours)'
+        );
+
+    }
+
+    // Un relais en quarantaine reste testé, mais au compte-gouttes.
+    function isQuarantineProbeDue(proxy) {
+
+        if (!proxy.quarantine) {
+            return false;
+        }
+
+        var lastProbe = proxy.quarantine.lastProbe || 0;
+
+        return (Date.now() - lastProbe) >= QUARANTINE_PROBE_INTERVAL_MS;
+
+    }
+
+    // roundResults : [{ proxy, ok, entry }] pour UNE salve de tests.
+    function applyQuarantineRules(roundResults) {
+
+        if (!roundResults.length) {
+            return;
+        }
+
+        var anySuccess = roundResults.some(function (result) {
+            return result.ok;
+        });
+
+        // Salve non concluante (chaîne hors ligne, coupure réseau,
+        // ...) : elle ne prouve rien sur l'état des relais, on ne
+        // juge personne.
+        if (!anySuccess) {
+            return;
+        }
+
+        roundResults.forEach(function (result) {
+
+            if (result.entry) {
+                result.entry.r = 1;
+            }
+
+        });
+
+        roundResults.forEach(function (result) {
+
+            if (result.ok) {
+
+                releaseFromQuarantine(result.proxy, false);
+
+                return;
+
+            }
+
+            evaluateQuarantine(result.proxy);
+
+        });
+
+        scheduleStatsSave();
+
+    }
+
+    function evaluateQuarantine(proxy) {
+
+        if (isQuarantined(proxy)) {
+            return;
+        }
+
+        if (
+            proxy.quarantineProtectedUntil &&
+            Date.now() < proxy.quarantineProtectedUntil
+        ) {
+            return;
+        }
+
+        var cutoff = Date.now() - STATS_HISTORY_MS;
+
+        var judged = (pageStats.proxyHistory[proxy.id] || []).filter(
+            function (entry) {
+                return entry.t >= cutoff && entry.r === 1;
+            }
+        );
+
+        if (judged.length < QUARANTINE_MIN_TESTS) {
+            return;
+        }
+
+        var hasSuccess = judged.some(function (entry) {
+            return entry.ok;
+        });
+
+        if (hasSuccess) {
+            return;
+        }
+
+        // Jamais le dernier relais debout : mieux vaut un relais
+        // douteux que plus aucun relais du tout.
+        if (getRaceableProxies().length <= 1) {
+            return;
+        }
+
+        quarantineProxy(proxy, judged.length);
+
+    }
+
+    // Un relais rapide mais qui ne répond qu'une fois sur trois ne
+    // vaut pas mieux qu'un relais un peu plus lent mais toujours là.
+    // Le score combine donc les deux : à 100 % de réussite et
+    // 300 ms il vaut 100, et il tombe de moitié vers 1,5 s.
+    function computeProxyScore(successRate, avgLatency) {
+
+        if (successRate === null || avgLatency === null) {
+            return null;
+        }
+
+        var latencyFactor =
+            1 / (1 + Math.max(0, avgLatency - 300) / 1200);
+
+        return Math.round(successRate * latencyFactor);
+
+    }
+
+    // Classement des meilleurs relais sur les 7 derniers jours,
+    // trié par score (voir computeProxyScore) et non par latence
+    // brute.
     function getProxyRanking24h() {
 
         var cutoff = Date.now() - STATS_HISTORY_MS;
@@ -1237,16 +1555,19 @@
                 testCount: recentAll.length,
                 successRate: successRate,
                 usage: pageStats.proxyUsage[proxy.id] || 0,
-                bandwidth: pageStats.bandwidthByProxy[proxy.id] || 0
+                bandwidth: pageStats.bandwidthByProxy[proxy.id] || 0,
+                quarantined: !!proxy.quarantine,
+                score: computeProxyScore(successRate, avgLatency)
             };
 
         }).sort(function (a, b) {
 
-            if (a.avgLatency === null && b.avgLatency === null) return 0;
-            if (a.avgLatency === null) return 1;
-            if (b.avgLatency === null) return -1;
+            // Les relais jamais testés restent en fin de liste.
+            if (a.score === null && b.score === null) return 0;
+            if (a.score === null) return 1;
+            if (b.score === null) return -1;
 
-            return a.avgLatency - b.avgLatency;
+            return b.score - a.score;
 
         });
 
@@ -1495,8 +1816,8 @@
     var HOURLY_WATCH_HISTORY_HOURS = 48;
 
     // Les clés "YYYY-MM-DD-HH" se comparent aussi lexicographiquement
-    // comme des dates (même principe que pruneDailyWatchTime).
-    function pruneHourlyWatchTime() {
+    // comme des dates (même principe que pruneDailyMap).
+    function pruneHourlyMap(map) {
 
         var cutoff = new Date();
 
@@ -1504,10 +1825,10 @@
 
         var cutoffKey = hourKeyFor(cutoff);
 
-        Object.keys(pageStats.hourlyWatchTime).forEach(function (key) {
+        Object.keys(map).forEach(function (key) {
 
             if (key < cutoffKey) {
-                delete pageStats.hourlyWatchTime[key];
+                delete map[key];
             }
 
         });
@@ -1517,7 +1838,7 @@
     // Les clés "YYYY-MM-DD" se comparent lexicographiquement comme
     // des dates, pas besoin de les reparser pour trouver les vieilles
     // entrées à purger.
-    function pruneDailyWatchTime() {
+    function pruneDailyMap(map) {
 
         var cutoff = new Date();
 
@@ -1525,58 +1846,68 @@
 
         var cutoffKey = dateKeyFor(cutoff);
 
-        Object.keys(pageStats.dailyWatchTime).forEach(function (key) {
+        Object.keys(map).forEach(function (key) {
 
             if (key < cutoffKey) {
-                delete pageStats.dailyWatchTime[key];
+                delete map[key];
             }
 
         });
 
     }
 
-    function trackBandwidthAndWatchTime() {
+    // ------------------------------------------------------------
+    // BANDE PASSANTE : 3 sources, de la plus fiable à la moins
+    // ------------------------------------------------------------
+    //
+    // 1. 'network'  : taille réelle de chaque segment vidéo, mesurée
+    //                 dans le Worker HLS déjà patché (voir makePatch)
+    //                 et remontée ici par BroadcastChannel. Exact,
+    //                 et fonctionne sur tous les navigateurs.
+    //
+    // 2. 'decoder'  : compteurs d'octets décodés du lecteur
+    //                 (webkitVideoDecodedByteCount) — exact aussi,
+    //                 mais propriété non standard : Chrome/Edge
+    //                 uniquement, absente de Firefox.
+    //
+    // 3. 'estimate' : l'ancienne méthode (table bitrate ↔ résolution),
+    //                 gardée en dernier recours si aucune des deux
+    //                 autres n'est disponible.
 
-        var channel = getTestChannel();
+    // Date du dernier paquet d'octets reçu du Worker. Au-delà de ce
+    // délai sans rien recevoir alors que la vidéo tourne, on
+    // considère que le comptage réseau n'aboutit pas (Twitch peut
+    // très bien charger ses segments ailleurs que dans le Worker
+    // qu'on patche) et on bascule sur les sources de repli.
+    var lastNetworkBytesAt = 0;
+    var NETWORK_BYTES_MAX_AGE_MS = 20000;
 
-        if (!channel) {
+    function isNetworkBandwidthLive() {
+
+        return (Date.now() - lastNetworkBytesAt) < NETWORK_BYTES_MAX_AGE_MS;
+
+    }
+
+    // Point d'entrée unique des trois sources : c'est le seul
+    // endroit qui écrit les octets dans les stats.
+    function recordBandwidthBytes(channel, bytes, source) {
+
+        if (!channel || !bytes || bytes <= 0) {
             return;
         }
 
-        var video = document.querySelector('video');
-
-        if (!video || video.paused || video.ended || video.readyState < 2) {
-            return;
-        }
-
-        var kbps = estimateKbpsForHeight(video.videoHeight || 0);
-
-        var bytes = Math.round((kbps * 1000 / 8) * (BANDWIDTH_TICK_MS / 1000));
+        bytes = Math.round(bytes);
 
         var streamer = getStreamerStats(channel);
 
-        streamer.watchTimeMs += BANDWIDTH_TICK_MS;
         streamer.bandwidthBytes += bytes;
         streamer.lastSeen = Date.now();
 
-        pageStats.totals.watchTimeMsGlobal += BANDWIDTH_TICK_MS;
         pageStats.totals.bandwidthBytesGlobal += bytes;
 
-        var now2 = new Date();
-
-        var dayKey = dateKeyFor(now2);
-
-        pageStats.dailyWatchTime[dayKey] =
-            (pageStats.dailyWatchTime[dayKey] || 0) + BANDWIDTH_TICK_MS;
-
-        pruneDailyWatchTime();
-
-        var hourKey = hourKeyFor(now2);
-
-        pageStats.hourlyWatchTime[hourKey] =
-            (pageStats.hourlyWatchTime[hourKey] || 0) + BANDWIDTH_TICK_MS;
-
-        pruneHourlyWatchTime();
+        if (source) {
+            pageStats.bandwidthSource = source;
+        }
 
         if (
             activeProxyInfo &&
@@ -1589,6 +1920,424 @@
                 (pageStats.bandwidthByProxy[activeProxyInfo.proxyId] || 0) + bytes;
 
         }
+
+        // Historique daté, pour le graphique : mêmes clés que le
+        // temps de visionnage (un total par jour, un par heure).
+        var bwNow = new Date();
+
+        var bwDayKey = dateKeyFor(bwNow);
+
+        pageStats.dailyBandwidth[bwDayKey] =
+            (pageStats.dailyBandwidth[bwDayKey] || 0) + bytes;
+
+        pruneDailyMap(pageStats.dailyBandwidth);
+
+        var bwHourKey = hourKeyFor(bwNow);
+
+        pageStats.hourlyBandwidth[bwHourKey] =
+            (pageStats.hourlyBandwidth[bwHourKey] || 0) + bytes;
+
+        pruneHourlyMap(pageStats.hourlyBandwidth);
+
+        scheduleStatsSave();
+
+    }
+
+    // Compteurs d'octets décodés (Chrome/Edge). On ne garde que le
+    // delta entre deux ticks ; un compteur qui repart en arrière
+    // signifie qu'on a changé de flux, on repart alors de zéro.
+    var decoderByteSample = { video: null, total: 0 };
+
+    function readDecoderBytesDelta(video) {
+
+        if (typeof video.webkitVideoDecodedByteCount !== 'number') {
+            return null;
+        }
+
+        var total =
+            (video.webkitVideoDecodedByteCount || 0) +
+            (video.webkitAudioDecodedByteCount || 0);
+
+        if (
+            decoderByteSample.video !== video ||
+            total < decoderByteSample.total
+        ) {
+
+            decoderByteSample = { video: video, total: total };
+
+            return 0;
+
+        }
+
+        var delta = total - decoderByteSample.total;
+
+        decoderByteSample.total = total;
+
+        return delta;
+
+    }
+
+    // ------------------------------------------------------------
+    // TEMPS DE VISIONNAGE : progression réelle de la lecture
+    // ------------------------------------------------------------
+    //
+    // On mesure le delta de video.currentTime plutôt que d'ajouter
+    // bêtement la durée du tick : c'est le temps RÉELLEMENT lu, donc
+    // insensible au ralentissement des timers par le navigateur, et
+    // le buffering/les coupures ne sont plus comptés comme du
+    // visionnage. Les sauts (retour arrière dans le DVR, saut au
+    // direct) sont ignorés ou plafonnés.
+
+    var watchTimeSample = { channel: null, currentTime: null, at: 0 };
+
+    // Marge tolérée au-dessus du temps réellement écoulé entre deux
+    // ticks, pour absorber les petites imprécisions de mesure.
+    var WATCH_DELTA_MAX_RATIO = 1.5;
+
+    function readWatchedMs(video, channel) {
+
+        var now = Date.now();
+
+        var currentTime = video.currentTime;
+
+        var previous = watchTimeSample;
+
+        watchTimeSample = {
+            channel: channel,
+            currentTime: currentTime,
+            at: now
+        };
+
+        if (
+            previous.channel !== channel ||
+            typeof previous.currentTime !== 'number' ||
+            typeof currentTime !== 'number'
+        ) {
+            return 0;
+        }
+
+        var deltaMs = (currentTime - previous.currentTime) * 1000;
+
+        // Retour arrière (seek) : rien à compter pour ce tick.
+        if (deltaMs <= 0) {
+            return 0;
+        }
+
+        // Saut en avant : on ne peut pas avoir lu plus que le temps
+        // écoulé depuis le tick précédent. Ce plafond se cale sur
+        // l'horloge RÉELLE et non sur BANDWIDTH_TICK_MS : le
+        // navigateur étire les minuteurs des onglets en
+        // arrière-plan, et un plafond figé à 7,5 s y sous-comptait
+        // le visionnage alors que la lecture, elle, avait bien
+        // avancé pendant tout l'intervalle.
+        var elapsedMs = previous.at
+            ? (now - previous.at)
+            : BANDWIDTH_TICK_MS;
+
+        return Math.min(
+            deltaMs,
+            Math.max(elapsedMs, BANDWIDTH_TICK_MS) * WATCH_DELTA_MAX_RATIO
+        );
+
+    }
+
+    // ------------------------------------------------------------
+    // SESSIONS DE VISIONNAGE
+    // ------------------------------------------------------------
+    //
+    // Une session = un bloc de visionnage continu. Deux ticks
+    // séparés de moins de SESSION_GAP_MS appartiennent à la même
+    // session ; au-delà (pause, changement d'activité, nuit), une
+    // nouvelle commence. Peu importe le streamer : enchaîner deux
+    // chaînes sans s'arrêter reste une seule session.
+
+    var SESSION_GAP_MS = 10 * 60 * 1000;
+    var SESSIONS_MAX = 500;
+
+    function recordSessionProgress(watchedMs) {
+
+        var now = Date.now();
+
+        var sessions = pageStats.sessions;
+
+        var last = sessions[sessions.length - 1];
+
+        if (last && (now - last.end) <= SESSION_GAP_MS) {
+
+            last.end = now;
+            last.ms += watchedMs;
+
+            return;
+
+        }
+
+        sessions.push({
+            start: now - watchedMs,
+            end: now,
+            ms: watchedMs
+        });
+
+        if (sessions.length > SESSIONS_MAX) {
+            sessions.shift();
+        }
+
+    }
+
+    // ------------------------------------------------------------
+    // CE QUI COMPTE VRAIMENT COMME DU VISIONNAGE
+    // ------------------------------------------------------------
+    //
+    // Une page Twitch peut lire une vidéo sans que tu regardes quoi
+    // que ce soit : aperçu automatique du stream en vedette sur
+    // l'accueil, carte survolée dans Parcourir, bande-annonce d'une
+    // chaîne hors ligne... Tout ça passe par le même <video> et par
+    // le même Worker HLS patché. Sans filtre, ces flux gonflent le
+    // temps de visionnage ET la bande passante, et créent même des
+    // fiches streamer pour des chaînes jamais regardées.
+    //
+    // On ne crédite donc que deux surfaces :
+    //
+    //   - le lecteur principal, sur la page d'une chaîne (plein
+    //     écran, theatre mode ou fenêtré, peu importe) ;
+    //   - le mini-player flottant, qui est bien une lecture que TU
+    //     as lancée et qui continue pendant que tu navigues ailleurs
+    //     sur le site.
+    //
+    // Rien ici ne dépend du focus ni de la visibilité de l'onglet :
+    // un onglet en arrière-plan continue de compter normalement.
+
+    // Chaîne réellement jouée par le lecteur de CET onglet, remontée
+    // par le Worker HLS. C'est la seule source qui connaisse la
+    // chaîne du mini-player, puisqu'elle n'est plus dans l'URL une
+    // fois qu'on a navigué ailleurs.
+    var playerChannel = null;
+    var playerChannelAt = 0;
+
+    var PLAYER_CHANNEL_MAX_AGE_MS = 60000;
+
+    function getLivePlayerChannel() {
+
+        if (
+            !playerChannel ||
+            (Date.now() - playerChannelAt) > PLAYER_CHANNEL_MAX_AGE_MS
+        ) {
+            return null;
+        }
+
+        return playerChannel;
+
+    }
+
+    // Repli quand le Worker n'a rien remonté (segments chargés hors
+    // du Worker patché) : le conteneur flottant contient un lien
+    // vers la chaîne qu'il est en train de lire.
+    function getFloatingPlayerChannel(video) {
+
+        var container = getFloatingPlayerContainer(video);
+
+        if (!container) {
+            return null;
+        }
+
+        var links = container.querySelectorAll('a[href^="/"]');
+
+        for (var i = 0; i < links.length; i++) {
+
+            var parts = links[i]
+                .getAttribute('href')
+                .split('/')
+                .filter(Boolean);
+
+            if (
+                parts.length === 1 &&
+                NON_CHANNEL_PATHS.indexOf(parts[0].toLowerCase()) === -1
+            ) {
+
+                return parts[0].toLowerCase();
+
+            }
+
+        }
+
+        return null;
+
+    }
+
+    // Un live n'a pas de durée connue (MSE laisse `duration` à
+    // Infinity) ; une bande-annonce ou un rediff de chaîne hors
+    // ligne est une VOD, donc de durée finie. Les deux signaux se
+    // couvrent l'un l'autre volontairement : on n'écarte une vidéo
+    // que si AUCUN des deux ne dit « live », pour ne jamais risquer
+    // d'arrêter de compter un vrai stream si Twitch changeait la
+    // façon dont il renseigne `duration`.
+    function isLivePlayback(video) {
+
+        if (!isFinite(video.duration)) {
+            return true;
+        }
+
+        return isNetworkBandwidthLive();
+
+    }
+
+    // Un lecteur flottant ouvert a la priorité : sur l'accueil par
+    // exemple, l'aperçu en vedette apparaît avant lui dans le DOM et
+    // serait sinon choisi à sa place.
+    function findPlaybackVideo() {
+
+        var videos = document.querySelectorAll('video');
+
+        for (var i = 0; i < videos.length; i++) {
+
+            if (isMiniPlayerVideo(videos[i])) {
+                return videos[i];
+            }
+
+        }
+
+        return videos[0] || null;
+
+    }
+
+    // Renvoie { video, channel } si cet onglet lit bien un live à
+    // comptabiliser, sinon null.
+    function getActivePlayback() {
+
+        var video = findPlaybackVideo();
+
+        if (
+            !video ||
+            video.paused ||
+            video.ended ||
+            video.readyState < 2
+        ) {
+            return null;
+        }
+
+        if (!isLivePlayback(video)) {
+            return null;
+        }
+
+        var urlChannel = getTestChannel();
+
+        // Page d'une chaîne : c'est elle qu'on crédite. Twitch
+        // referme le mini-player en arrivant sur une chaîne, il n'y
+        // a donc pas d'ambiguïté possible ici.
+        if (urlChannel) {
+
+            return { video: video, channel: urlChannel };
+
+        }
+
+        // Ailleurs (accueil, Parcourir, ...) : seul le lecteur
+        // flottant compte, tout le reste est un aperçu automatique.
+        if (!isMiniPlayerVideo(video)) {
+            return null;
+        }
+
+        var floatingChannel =
+            getLivePlayerChannel() ||
+            getFloatingPlayerChannel(video);
+
+        return floatingChannel
+            ? { video: video, channel: floatingChannel }
+            : null;
+
+    }
+
+    function getWatchedChannel() {
+
+        var playback = getActivePlayback();
+
+        return playback ? playback.channel : null;
+
+    }
+
+
+    function trackBandwidthAndWatchTime() {
+
+        var playback = getActivePlayback();
+
+        if (!playback) {
+
+            // Lecture interrompue, ou vidéo qui ne doit pas compter
+            // (aperçu automatique, bande-annonce) : on oublie le
+            // repère, sinon la reprise compterait tout le temps
+            // écoulé entre les deux.
+            watchTimeSample = { channel: null, currentTime: null, at: 0 };
+
+            return;
+
+        }
+
+        var channel = playback.channel;
+        var video = playback.video;
+
+        var watchedMs = readWatchedMs(video, channel);
+
+        // ---- bande passante ----
+
+        if (isNetworkBandwidthLive()) {
+
+            // Déjà comptabilisée à la réception (source 'network').
+
+        } else {
+
+            var decoderDelta = readDecoderBytesDelta(video);
+
+            if (decoderDelta !== null) {
+
+                recordBandwidthBytes(channel, decoderDelta, 'decoder');
+
+            } else if (watchedMs > 0) {
+
+                var kbps = estimateKbpsForHeight(video.videoHeight || 0);
+
+                recordBandwidthBytes(
+                    channel,
+                    (kbps * 1000 / 8) * (watchedMs / 1000),
+                    'estimate'
+                );
+
+            }
+
+        }
+
+        // ---- temps de visionnage ----
+
+        if (watchedMs <= 0) {
+            return;
+        }
+
+        var streamer = getStreamerStats(channel);
+
+        streamer.watchTimeMs += watchedMs;
+        streamer.lastSeen = Date.now();
+
+        pageStats.totals.watchTimeMsGlobal += watchedMs;
+
+        recordSessionProgress(watchedMs);
+
+        var now2 = new Date();
+
+        var dayKey = dateKeyFor(now2);
+
+        pageStats.dailyWatchTime[dayKey] =
+            (pageStats.dailyWatchTime[dayKey] || 0) + watchedMs;
+
+        pruneDailyMap(pageStats.dailyWatchTime);
+
+        var hourKey = hourKeyFor(now2);
+
+        pageStats.hourlyWatchTime[hourKey] =
+            (pageStats.hourlyWatchTime[hourKey] || 0) + watchedMs;
+
+        pruneHourlyMap(pageStats.hourlyWatchTime);
+
+        var heatKey = now2.getDay() + '-' + now2.getHours();
+
+        pageStats.watchHeatmap[heatKey] =
+            (pageStats.watchHeatmap[heatKey] || 0) + watchedMs;
 
         scheduleStatsSave();
 
@@ -1628,6 +2377,834 @@
         }
 
         return minutes + ' min';
+
+    }
+
+
+    // ============================================================
+    // SAUVEGARDE DES STATISTIQUES SUR LE DISQUE
+    // ============================================================
+    //
+    // Les stats ne vivent que dans le localStorage de twitch.tv : un
+    // "supprimer les données du site" et des mois d'historique
+    // disparaissent. Un userscript ne peut PAS écrire sur le disque
+    // en douce, donc deux modes :
+    //
+    // - File System Access API (Chrome/Edge) : l'utilisateur désigne
+    //   un fichier UNE fois, on garde son "handle" dans IndexedDB
+    //   (il n'est pas sérialisable en JSON, d'où IndexedDB et pas
+    //   localStorage) et on réécrit dedans tout seul ensuite.
+    //
+    // - Partout ailleurs (Firefox...) : rappel dans le menu + export
+    //   en un clic, qui passe par un téléchargement classique.
+
+    var BACKUP_STATE_KEY = 'twitchProxyBackupStateV1';
+    var BACKUP_DB_NAME = 'twitchProxyBackupV1';
+    var BACKUP_STORE_NAME = 'handles';
+    var BACKUP_HANDLE_KEY = 'statsFile';
+
+    var AUTO_BACKUP_MIN_INTERVAL_MS = 15 * 60 * 1000;
+    var AUTO_BACKUP_CHECK_MS = 5 * 60 * 1000;
+    var BACKUP_REMINDER_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+
+    // Passe à true quand une écriture silencieuse échoue faute
+    // d'autorisation (le navigateur exige alors un clic).
+    var backupNeedsPermission = false;
+
+    // Copie en mémoire du handle stocké en IndexedDB (voir plus bas
+    // pourquoi l'accès doit pouvoir être synchrone).
+    var backupHandleCached = null;
+
+    function supportsFileBackup() {
+
+        return typeof window.showSaveFilePicker === 'function';
+
+    }
+
+    function loadBackupState() {
+
+        try {
+
+            var saved = localStorage.getItem(BACKUP_STATE_KEY);
+
+            if (saved) {
+                return JSON.parse(saved) || {};
+            }
+
+        } catch (e) {}
+
+        return {};
+
+    }
+
+    var backupState = loadBackupState();
+
+    function saveBackupState() {
+
+        try {
+
+            localStorage.setItem(
+                BACKUP_STATE_KEY,
+                JSON.stringify(backupState)
+            );
+
+        } catch (e) {}
+
+    }
+
+    // ------------------------------------------------------------
+    // IndexedDB : conservation du handle de fichier
+    // ------------------------------------------------------------
+
+    function openBackupDB() {
+
+        return new Promise(function (resolve, reject) {
+
+            if (!window.indexedDB) {
+
+                reject(new Error('IndexedDB indisponible'));
+
+                return;
+
+            }
+
+            var request = indexedDB.open(BACKUP_DB_NAME, 1);
+
+            request.onupgradeneeded = function () {
+
+                var db = request.result;
+
+                if (!db.objectStoreNames.contains(BACKUP_STORE_NAME)) {
+                    db.createObjectStore(BACKUP_STORE_NAME);
+                }
+
+            };
+
+            request.onsuccess = function () {
+                resolve(request.result);
+            };
+
+            request.onerror = function () {
+                reject(request.error);
+            };
+
+        });
+
+    }
+
+    function withBackupStore(mode, action) {
+
+        return openBackupDB().then(function (db) {
+
+            return new Promise(function (resolve, reject) {
+
+                var tx = db.transaction(BACKUP_STORE_NAME, mode);
+
+                var request = action(tx.objectStore(BACKUP_STORE_NAME));
+
+                request.onsuccess = function () {
+                    resolve(request.result);
+                };
+
+                request.onerror = function () {
+                    reject(request.error);
+                };
+
+            });
+
+        });
+
+    }
+
+    function saveBackupHandle(handle) {
+
+        backupHandleCached = handle;
+
+        return withBackupStore('readwrite', function (store) {
+            return store.put(handle, BACKUP_HANDLE_KEY);
+        });
+
+    }
+
+    function loadBackupHandle() {
+
+        return withBackupStore('readonly', function (store) {
+            return store.get(BACKUP_HANDLE_KEY);
+        }).then(function (handle) {
+
+            backupHandleCached = handle || null;
+
+            return backupHandleCached;
+
+        }).catch(function () {
+            return null;
+        });
+
+    }
+
+    function clearBackupHandle() {
+
+        backupHandleCached = null;
+
+        return withBackupStore('readwrite', function (store) {
+            return store.delete(BACKUP_HANDLE_KEY);
+        }).catch(function () {});
+
+    }
+
+    // Charge le handle au démarrage pour que les clics suivants
+    // puissent décider sans attendre.
+    function primeBackupHandle() {
+
+        if (!supportsFileBackup()) {
+            return;
+        }
+
+        loadBackupHandle().then(function () {
+
+            updateBackupUI();
+
+        });
+
+    }
+
+    // ------------------------------------------------------------
+    // Contenu sauvegardé
+    // ------------------------------------------------------------
+
+    function buildStatsBackupPayload() {
+
+        return {
+            app: 'twitch-hls-proxy',
+            kind: 'stats',
+            version: CURRENT_VERSION,
+            exportedAt: Date.now(),
+            stats: pageStats
+        };
+
+    }
+
+    function markBackupDone(mode, fileName) {
+
+        backupState.lastBackupAt = Date.now();
+        backupState.lastBackupMode = mode;
+
+        if (fileName) {
+            backupState.fileName = fileName;
+        }
+
+        backupNeedsPermission = false;
+
+        saveBackupState();
+
+        updateBackupUI();
+
+    }
+
+    // Horodatage lisible pour un nom de fichier : jour-mois-année
+    // (et pas le format ISO de dateKeyFor, qui sert au tri interne
+    // des clés de statistiques).
+    function backupStampFor(date) {
+
+        return (
+            pad2(date.getDate()) + '-' +
+            pad2(date.getMonth() + 1) + '-' +
+            date.getFullYear() + '_' +
+            pad2(date.getHours()) + 'h' +
+            pad2(date.getMinutes())
+        );
+
+    }
+
+    // Téléchargement classique : fonctionne sur tous les navigateurs,
+    // sans aucune permission, mais chaque sauvegarde crée un fichier
+    // de plus dans le dossier Téléchargements.
+    function downloadStatsBackup() {
+
+        try {
+
+            var blob = new Blob(
+                [JSON.stringify(buildStatsBackupPayload(), null, 2)],
+                { type: 'application/json' }
+            );
+
+            var url = URL.createObjectURL(blob);
+
+            var link = document.createElement('a');
+
+            var now = new Date();
+
+            link.href = url;
+
+            var fileName =
+                'Twitch_HLS_Proxy-' +
+                backupStampFor(now) +
+                '.json';
+
+            link.download = fileName;
+
+            document.body.appendChild(link);
+
+            link.click();
+
+            document.body.removeChild(link);
+
+            setTimeout(function () {
+                URL.revokeObjectURL(url);
+            }, 1000);
+
+            markBackupDone('download', fileName);
+
+            // Le téléchargement est silencieux : sans retour, on a
+            // l'impression qu'il ne s'est rien passé (ou pire, on ne
+            // sait pas où le fichier est parti).
+            showToast({
+
+                icon: '📥',
+
+                title: 'Sauvegarde téléchargée',
+
+                text:
+                    fileName + ' — dans ton dossier Téléchargements. ' +
+                    'Pour choisir où l\'enregistrer, active « Toujours demander où ' +
+                    'enregistrer les fichiers » dans les paramètres de ton navigateur.',
+
+                ok: true,
+
+                duration: 9000
+
+            });
+
+            return true;
+
+        } catch (e) {
+
+            console.warn('[TwitchProxy] Export des stats impossible:', e);
+
+            return false;
+
+        }
+
+    }
+
+    async function ensureBackupPermission(handle, allowPrompt) {
+
+        if (typeof handle.queryPermission !== 'function') {
+            return true;
+        }
+
+        var status = await handle.queryPermission({ mode: 'readwrite' });
+
+        if (status === 'granted') {
+            return true;
+        }
+
+        if (!allowPrompt || typeof handle.requestPermission !== 'function') {
+
+            backupNeedsPermission = true;
+
+            updateBackupUI();
+
+            return false;
+
+        }
+
+        status = await handle.requestPermission({ mode: 'readwrite' });
+
+        return status === 'granted';
+
+    }
+
+    // silent = true : appelé par le minuteur, sans clic de
+    // l'utilisateur — on n'ose alors aucune boîte de dialogue.
+    async function writeStatsBackup(silent) {
+
+        var handle = backupHandleCached || await loadBackupHandle();
+
+        if (!handle) {
+            return false;
+        }
+
+        try {
+
+            var allowed = await ensureBackupPermission(handle, !silent);
+
+            if (!allowed) {
+                return false;
+            }
+
+            var writable = await handle.createWritable();
+
+            await writable.write(
+                JSON.stringify(buildStatsBackupPayload(), null, 2)
+            );
+
+            await writable.close();
+
+            markBackupDone('file', handle.name);
+
+            return true;
+
+        } catch (e) {
+
+            console.warn('[TwitchProxy] Sauvegarde des stats impossible:', e);
+
+            if (!silent) {
+
+                alert(
+                    'Impossible d\'écrire dans le fichier de sauvegarde.\n\n' +
+                    'Il a peut-être été déplacé ou supprimé : choisis-en un nouveau.'
+                );
+
+                await clearBackupHandle();
+
+                updateBackupUI();
+
+            }
+
+            return false;
+
+        }
+
+    }
+
+    // Doit être appelé depuis un vrai clic : le sélecteur de fichier
+    // exige une interaction utilisateur.
+    async function chooseStatsBackupFile() {
+
+        if (!supportsFileBackup()) {
+
+            downloadStatsBackup();
+
+            return;
+
+        }
+
+        try {
+
+            var handle = await window.showSaveFilePicker({
+
+                suggestedName:
+                    'Twitch_HLS_Proxy-' +
+                    backupStampFor(new Date()) +
+                    '.json',
+
+                types: [{
+                    description: 'Sauvegarde Twitch Proxy',
+                    accept: { 'application/json': ['.json'] }
+                }]
+
+            });
+
+            await saveBackupHandle(handle);
+
+            await writeStatsBackup(false);
+
+            logEvent('success', 'Fichier de sauvegarde des stats configuré');
+
+        } catch (e) {
+
+            // AbortError = l'utilisateur a simplement annulé.
+            if (!e || e.name !== 'AbortError') {
+
+                console.warn('[TwitchProxy] Choix du fichier impossible:', e);
+
+            }
+
+        }
+
+    }
+
+    // ------------------------------------------------------------
+    // Restauration
+    // ------------------------------------------------------------
+
+    function maxNum(a, b) {
+
+        return Math.max(a || 0, b || 0);
+
+    }
+
+    function mergeNumericMap(target, incoming) {
+
+        Object.keys(incoming || {}).forEach(function (key) {
+
+            target[key] = maxNum(target[key], incoming[key]);
+
+        });
+
+    }
+
+    // Fusion "valeur la plus complète" : pour chaque compteur on
+    // garde le plus grand des deux, jamais la somme. C'est le seul
+    // comportement qui ne gonfle JAMAIS les stats si on restaure une
+    // sauvegarde qui recouvre en partie ce qui est déjà là — le cas
+    // normal quand on répare une perte de données.
+    function mergeStatsFrom(incoming) {
+
+        if (!incoming || typeof incoming !== 'object') {
+            return false;
+        }
+
+        mergeNumericMap(pageStats.proxyUsage, incoming.proxyUsage);
+        mergeNumericMap(pageStats.bandwidthByProxy, incoming.bandwidthByProxy);
+        mergeNumericMap(pageStats.dailyWatchTime, incoming.dailyWatchTime);
+        mergeNumericMap(pageStats.hourlyWatchTime, incoming.hourlyWatchTime);
+        mergeNumericMap(pageStats.dailyBandwidth, incoming.dailyBandwidth);
+        mergeNumericMap(pageStats.hourlyBandwidth, incoming.hourlyBandwidth);
+        mergeNumericMap(pageStats.watchHeatmap, incoming.watchHeatmap);
+
+        Object.keys(incoming.totals || {}).forEach(function (key) {
+
+            pageStats.totals[key] = maxNum(
+                pageStats.totals[key],
+                incoming.totals[key]
+            );
+
+        });
+
+        // Historique des tests : union dédupliquée sur l'horodatage.
+        Object.keys(incoming.proxyHistory || {}).forEach(function (id) {
+
+            var current = pageStats.proxyHistory[id] || [];
+
+            var seen = {};
+
+            current.forEach(function (entry) {
+                seen[entry.t] = true;
+            });
+
+            (incoming.proxyHistory[id] || []).forEach(function (entry) {
+
+                if (!seen[entry.t]) {
+
+                    seen[entry.t] = true;
+
+                    current.push(entry);
+
+                }
+
+            });
+
+            current.sort(function (a, b) {
+                return a.t - b.t;
+            });
+
+            var cutoff = Date.now() - STATS_HISTORY_MS;
+
+            pageStats.proxyHistory[id] = current.filter(function (entry) {
+                return entry.t >= cutoff;
+            });
+
+        });
+
+        Object.keys(incoming.streamers || {}).forEach(function (channel) {
+
+            var source = incoming.streamers[channel];
+
+            if (!source) {
+                return;
+            }
+
+            var target = getStreamerStats(channel);
+
+            target.watchTimeMs = maxNum(target.watchTimeMs, source.watchTimeMs);
+            target.chatMessages = maxNum(target.chatMessages, source.chatMessages);
+            target.bandwidthBytes = maxNum(target.bandwidthBytes, source.bandwidthBytes);
+
+            mergeNumericMap(target.proxyUsage, source.proxyUsage);
+
+            target.firstSeen = Math.min(
+                target.firstSeen || source.firstSeen || Date.now(),
+                source.firstSeen || target.firstSeen || Date.now()
+            );
+
+            target.lastSeen = maxNum(target.lastSeen, source.lastSeen);
+
+            // Messages : union sur (horodatage + texte), le même
+            // message envoyé deux fois à deux moments différents
+            // reste donc bien compté deux fois.
+            var messages = Array.isArray(target.messages) ? target.messages : [];
+
+            var seenMessages = {};
+
+            messages.forEach(function (message) {
+                seenMessages[message.t + '|' + message.text] = true;
+            });
+
+            (source.messages || []).forEach(function (message) {
+
+                var key = message.t + '|' + message.text;
+
+                if (!seenMessages[key]) {
+
+                    seenMessages[key] = true;
+
+                    messages.push(message);
+
+                }
+
+            });
+
+            messages.sort(function (a, b) {
+                return a.t - b.t;
+            });
+
+            if (messages.length > CHAT_HISTORY_MAX_PER_STREAMER) {
+
+                messages = messages.slice(
+                    messages.length - CHAT_HISTORY_MAX_PER_STREAMER
+                );
+
+            }
+
+            target.messages = messages;
+
+        });
+
+        // Logs : union, les plus récents d'abord.
+        var logSeen = {};
+
+        pageStats.logs.forEach(function (entry) {
+            logSeen[entry.t + '|' + entry.msg] = true;
+        });
+
+        (incoming.logs || []).forEach(function (entry) {
+
+            var key = entry.t + '|' + entry.msg;
+
+            if (!logSeen[key]) {
+
+                logSeen[key] = true;
+
+                pageStats.logs.push(entry);
+
+            }
+
+        });
+
+        pageStats.logs.sort(function (a, b) {
+            return b.t - a.t;
+        });
+
+        if (pageStats.logs.length > STATS_MAX_LOGS) {
+            pageStats.logs.length = STATS_MAX_LOGS;
+        }
+
+        // Sessions : union dédupliquée sur l'horodatage de début.
+        var sessionSeen = {};
+
+        pageStats.sessions.forEach(function (session) {
+            sessionSeen[session.start] = true;
+        });
+
+        (incoming.sessions || []).forEach(function (session) {
+
+            if (session && !sessionSeen[session.start]) {
+
+                sessionSeen[session.start] = true;
+
+                pageStats.sessions.push(session);
+
+            }
+
+        });
+
+        pageStats.sessions.sort(function (a, b) {
+            return a.start - b.start;
+        });
+
+        if (pageStats.sessions.length > SESSIONS_MAX) {
+
+            pageStats.sessions = pageStats.sessions.slice(
+                pageStats.sessions.length - SESSIONS_MAX
+            );
+
+        }
+
+        if (!pageStats.bandwidthSource && incoming.bandwidthSource) {
+            pageStats.bandwidthSource = incoming.bandwidthSource;
+        }
+
+        return true;
+
+    }
+
+    function importStatsBackupFromFile(file) {
+
+        var reader = new FileReader();
+
+        reader.onload = function () {
+
+            try {
+
+                var parsed = JSON.parse(reader.result);
+
+                var incoming =
+                    parsed && parsed.stats
+                        ? parsed.stats
+                        : parsed;
+
+                if (
+                    !incoming ||
+                    typeof incoming !== 'object' ||
+                    !incoming.totals
+                ) {
+
+                    alert('Ce fichier ne ressemble pas à une sauvegarde de statistiques.');
+
+                    return;
+
+                }
+
+                mergeStatsFrom(incoming);
+
+                saveStatsNow();
+
+                logEvent('success', 'Statistiques restaurées depuis une sauvegarde');
+
+                renderStatsDashboard();
+
+                alert('Statistiques restaurées.');
+
+            } catch (e) {
+
+                console.warn('[TwitchProxy] Restauration impossible:', e);
+
+                alert('Fichier illisible : impossible de restaurer cette sauvegarde.');
+
+            }
+
+        };
+
+        reader.onerror = function () {
+
+            alert('Erreur de lecture du fichier.');
+
+        };
+
+        reader.readAsText(file);
+
+    }
+
+    // ------------------------------------------------------------
+    // Automatisation + rappel
+    // ------------------------------------------------------------
+
+    function backupIsOverdue() {
+
+        if (!pageConfig.autoBackupStats) {
+            return false;
+        }
+
+        if (backupNeedsPermission) {
+            return true;
+        }
+
+        if (!backupState.lastBackupAt) {
+            return true;
+        }
+
+        return (Date.now() - backupState.lastBackupAt) > BACKUP_REMINDER_AFTER_MS;
+
+    }
+
+    function startAutoBackup() {
+
+        primeBackupHandle();
+
+        if (!supportsFileBackup()) {
+            return;
+        }
+
+        setInterval(function () {
+
+            if (!pageConfig.autoBackupStats) {
+                return;
+            }
+
+            // lastBackupAt est dans le localStorage, donc partagé :
+            // si un autre onglet vient de sauvegarder, celui-ci ne
+            // réécrit pas le fichier pour rien.
+            backupState = loadBackupState();
+
+            if (
+                backupState.lastBackupAt &&
+                (Date.now() - backupState.lastBackupAt) < AUTO_BACKUP_MIN_INTERVAL_MS
+            ) {
+                return;
+            }
+
+            writeStatsBackup(true);
+
+        }, AUTO_BACKUP_CHECK_MS);
+
+    }
+
+    function formatBackupDate(timestamp) {
+
+        if (!timestamp) {
+            return 'jamais';
+        }
+
+        try {
+
+            return new Date(timestamp).toLocaleString(
+                [],
+                {
+                    day: '2-digit',
+                    month: '2-digit',
+                    year: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit'
+                }
+            );
+
+        } catch (e) {
+
+            return '—';
+
+        }
+
+    }
+
+    // Bannière de rappel dans le menu + rafraîchissement de l'onglet
+    // Sauvegarde s'il est ouvert.
+    function updateBackupUI() {
+
+        if (dashboard) {
+
+            var banner = dashboard.querySelector('.tp9-backup-banner');
+
+            if (banner) {
+
+                var overdue = backupIsOverdue();
+
+                banner.style.display = overdue ? 'flex' : 'none';
+
+                if (overdue) {
+
+                    banner.querySelector('.tp9-backup-text-sub').textContent =
+                        backupNeedsPermission
+                            ? 'Le navigateur demande de réautoriser l\'accès au fichier.'
+                            : 'Dernière sauvegarde : ' +
+                                formatBackupDate(backupState.lastBackupAt);
+
+                }
+
+            }
+
+        }
+
+        if (
+            statsDashboard &&
+            statsDashboardVisible &&
+            statsActiveTab === 'sauvegarde'
+        ) {
+
+            renderStatsBackup(statsDashboard.querySelector('.tp9s-content'));
+
+        }
 
     }
 
@@ -1813,6 +3390,10 @@
                                 ' (' + activeProxyInfo.channel + ')'
                             );
 
+                            notifyProxyRecovered(
+                                activeProxyInfo.proxyName
+                            );
+
                         } else if (
                             activeProxyInfo.direct
                         ) {
@@ -1823,9 +3404,49 @@
                                 activeProxyInfo.channel + ')'
                             );
 
+                            showDirectPlaybackToast(
+                                activeProxyInfo.channel
+                            );
+
                         }
 
                         renderDashboard();
+
+                    }
+
+                    // Octets réellement téléchargés, mesurés dans
+                    // le Worker HLS. Filtré sur TAB_ID : les autres
+                    // onglets twitch.tv reçoivent le même message et
+                    // ne doivent surtout pas le compter aussi.
+                    if (
+                        event.data &&
+                        event.data.type === 'bandwidth' &&
+                        event.data.tabId === TAB_ID
+                    ) {
+
+                        lastNetworkBytesAt = Date.now();
+
+                        // Sert à retrouver la chaîne lue par le
+                        // mini-player, qui n'est plus dans l'URL.
+                        playerChannel = event.data.channel;
+                        playerChannelAt = Date.now();
+
+                        // Le Worker mesure les octets de TOUT ce que
+                        // la page lit, aperçu automatique de
+                        // l'accueil compris : on ne crédite que si
+                        // c'est bien la lecture en cours (voir
+                        // getActivePlayback).
+                        if (
+                            event.data.channel === getWatchedChannel()
+                        ) {
+
+                            recordBandwidthBytes(
+                                event.data.channel,
+                                event.data.bytes,
+                                'network'
+                            );
+
+                        }
 
                     }
 
@@ -1912,7 +3533,28 @@
     <button class="tp9-update-btn" type="button">Mettre à jour</button>
 </div>
 
-<div class="tp9-active-proxy"></div>
+<div class="tp9-backup-banner" style="display:none;">
+    <div class="tp9-update-icon">💾</div>
+    <div class="tp9-update-text">
+        <div class="tp9-update-title">Sauvegarde tes statistiques</div>
+        <div class="tp9-update-version tp9-backup-text-sub"></div>
+        <div class="tp9-update-hint">Un nettoyage du navigateur les effacerait</div>
+    </div>
+    <button class="tp9-update-btn tp9-backup-btn-action" type="button">Sauvegarder</button>
+</div>
+
+<div class="tp9-hero tp9-hero-idle">
+    <span class="tp9-hero-dot"></span>
+    <div class="tp9-hero-text">
+        <div class="tp9-hero-label">LECTURE ACTUELLE</div>
+        <div class="tp9-hero-value">En attente du flux…</div>
+    </div>
+    <span class="tp9-hero-meta"></span>
+</div>
+
+<button class="tp9-open-stats" type="button">
+    <span class="tp9-btn-icon">📊</span> Ouvrir le dashboard complet
+</button>
 
 <div class="tp9-section-title tp9-proxy-title-row">
     <span>📡 PROXYS</span>
@@ -1954,6 +3596,17 @@
         </span>
         <span class="tp9-switch">
             <input type="checkbox" class="tp9-keep-quality">
+            <span class="tp9-switch-track"></span>
+        </span>
+    </label>
+
+    <label class="tp9-toggle-row tp9-auto-backup-row">
+        <span class="tp9-toggle-label">
+            <span class="tp9-toggle-icon">💾</span>
+            <span class="tp9-auto-backup-label">Sauvegarde auto des stats</span>
+        </span>
+        <span class="tp9-switch">
+            <input type="checkbox" class="tp9-auto-backup">
             <span class="tp9-switch-track"></span>
         </span>
     </label>
@@ -2020,21 +3673,12 @@
 
 </div>
 
-<button class="tp9-open-stats" type="button">
-    📊 Ouvrir le dashboard complet
-</button>
-
 <input
     type="file"
     class="tp9-import-file"
     accept="application/json"
     style="display:none;"
 >
-
-<div class="tp9-current-card">
-    <span class="tp9-current-icon">📶</span>
-    <span class="tp9-current">Aucun proxy testé</span>
-</div>
 
             </div>
 
@@ -2074,6 +3718,10 @@ document.addEventListener(
 
 
         injectDashboardCSS();
+
+        attachTooltips(dashboard);
+
+        attachSpotlight(dashboard);
 
 
         dashboard
@@ -2119,6 +3767,56 @@ document.addEventListener(
                     saveConfig(pageConfig);
 
                     renderDashboard();
+
+                }
+            );
+
+
+        dashboard
+            .querySelector('.tp9-auto-backup')
+            .addEventListener(
+                'change',
+                function (event) {
+
+                    pageConfig.autoBackupStats =
+                        event.target.checked;
+
+                    saveConfig(pageConfig);
+
+                    updateBackupUI();
+
+                }
+            );
+
+
+        // La bannière est un rappel : le clic doit donc RÉGLER le
+        // problème tout de suite. Comme on est dans un vrai clic
+        // utilisateur, on a le droit d'ouvrir le sélecteur de
+        // fichier ou de réclamer l'autorisation manquante.
+        dashboard
+            .querySelector('.tp9-backup-btn-action')
+            .addEventListener(
+                'click',
+                function () {
+
+                    if (!supportsFileBackup()) {
+
+                        downloadStatsBackup();
+
+                        return;
+
+                    }
+
+                    // Décision synchrone : voir primeBackupHandle().
+                    if (backupHandleCached) {
+
+                        writeStatsBackup(false);
+
+                    } else {
+
+                        chooseStatsBackupFile();
+
+                    }
 
                 }
             );
@@ -2237,6 +3935,9 @@ document.addEventListener(
                             DEFAULT_CACHE_DELAY,
 
                         keepQualityInBackground:
+                            true,
+
+                        autoBackupStats:
                             true
 
                     };
@@ -2508,7 +4209,8 @@ document.addEventListener(
 
                 row.className =
                     'tp9-proxy' +
-                    (proxy.enabled ? '' : ' tp9-proxy-disabled');
+                    (proxy.enabled ? '' : ' tp9-proxy-disabled') +
+                    (proxy.quarantine ? ' tp9-proxy-quarantined' : '');
 
 
                 row.style.setProperty(
@@ -2529,7 +4231,15 @@ document.addEventListener(
                     'tp9-status-never';
 
 
-                if (lastTest) {
+                if (proxy.quarantine) {
+
+                    statusText =
+                        '💤 en quarantaine';
+
+                    statusClass =
+                        'tp9-status-quarantine';
+
+                } else if (lastTest) {
 
                     if (
                         lastTest.ok
@@ -2595,13 +4305,23 @@ document.addEventListener(
                         : '';
 
 
+                var releaseButton =
+                    proxy.quarantine
+                        ? '<button class="tp9-unquarantine" type="button"' +
+                            ' data-tp9-tip="Sortir de la quarantaine"' +
+                            ' data-tp9-tip-sub="Le relais est protégé 24 h avant de pouvoir y' +
+                            ' retourner."' +
+                            ' aria-label="Sortir de la quarantaine">🔓</button>'
+                        : '';
+
+
                 var deleteButton =
                     proxy.custom
                         ? `
                             <button
                                 class="tp9-delete"
                                 type="button"
-                                title="Supprimer"
+                                data-tp9-tip="Supprimer ce proxy"
                                 aria-label="Supprimer"
                             >
                                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
@@ -2658,8 +4378,8 @@ document.addEventListener(
 
 
                     ${
-                        proxy.custom
-                            ? '<div class="tp9-move">' + deleteButton + '</div>'
+                        (proxy.custom || proxy.quarantine)
+                            ? '<div class="tp9-move">' + releaseButton + deleteButton + '</div>'
                             : ''
                     }
 
@@ -2748,6 +4468,37 @@ document.addEventListener(
                     );
 
 
+                if (proxy.quarantine) {
+
+                    row
+                        .querySelector(
+                            '.tp9-unquarantine'
+                        )
+                        .addEventListener(
+                            'click',
+                            function (event) {
+
+                                // Même piège que le toggle : la ligne
+                                // est reconstruite juste après, donc
+                                // on coupe la remontée avant, sinon le
+                                // listener global "clic en dehors"
+                                // referme tout le menu.
+                                event.stopPropagation();
+
+                                releaseFromQuarantine(proxy, true);
+
+                                saveConfig(pageConfig);
+
+                                broadcastConfig();
+
+                                renderDashboard();
+
+                            }
+                        );
+
+                }
+
+
                 if (proxy.custom) {
 
                     row
@@ -2804,6 +4555,52 @@ document.addEventListener(
 
         dashboard
             .querySelector(
+                '.tp9-auto-backup'
+            )
+            .checked =
+            !!pageConfig.autoBackupStats;
+
+
+        // Sans File System Access (Firefox), un script ne PEUT PAS
+        // réécrire un fichier tout seul : ici `autoBackupStats` ne
+        // pilote donc que la bannière de rappel. On renomme la
+        // ligne pour dire ce qu'elle fait vraiment — la masquer
+        // supprimerait le seul moyen de faire taire ce rappel.
+        var autoBackupRow =
+            dashboard.querySelector('.tp9-auto-backup-row');
+
+        if (autoBackupRow) {
+
+            var canWriteFile = supportsFileBackup();
+
+            autoBackupRow.querySelector('.tp9-auto-backup-label').textContent =
+                canWriteFile
+                    ? 'Sauvegarde auto des stats'
+                    : 'Rappel de sauvegarde';
+
+            autoBackupRow.setAttribute(
+                'data-tp9-tip',
+                canWriteFile
+                    ? 'Sauvegarde automatique'
+                    : 'Rappel de sauvegarde'
+            );
+
+            autoBackupRow.setAttribute(
+                'data-tp9-tip-sub',
+                canWriteFile
+                    ? 'Réécrit ton fichier de sauvegarde toutes les 15 minutes.'
+                    : 'Ton navigateur interdit à un script d\'écrire dans un fichier : ' +
+                        'le script te rappelle de sauvegarder au lieu de le faire seul.'
+            );
+
+        }
+
+
+        updateBackupUI();
+
+
+        dashboard
+            .querySelector(
                 '.tp9-timeout-select'
             )
             .value =
@@ -2821,10 +4618,6 @@ document.addEventListener(
                 DEFAULT_CACHE_DELAY
             );
 
-
-        updateCurrentTestInfo();
-
-        updateAutoTestStatus();
 
         updateActiveProxyDisplay();
 
@@ -2864,102 +4657,6 @@ document.addEventListener(
     }
 
 
-    function updateCurrentTestInfo() {
-
-        if (!dashboard) {
-            return;
-        }
-
-
-        var current =
-            dashboard.querySelector(
-                '.tp9-current'
-            );
-
-
-        if (!current) {
-            return;
-        }
-
-
-        var tested =
-            pageConfig.proxies.filter(
-                function (proxy) {
-                    return !!proxy.lastTest;
-                }
-            );
-
-
-        if (!tested.length) {
-
-            current.textContent =
-                'Aucun proxy testé';
-
-            return;
-
-        }
-
-
-        var successful =
-            tested.filter(
-                function (proxy) {
-                    return proxy.lastTest.ok;
-                }
-            );
-
-
-        current.textContent =
-            successful.length +
-            ' proxy(s) OK · ' +
-            tested.length +
-            ' testé(s)';
-
-    }
-
-    function updateAutoTestStatus() {
-
-        if (!dashboard) {
-            return;
-        }
-
-        var current = dashboard.querySelector('.tp9-current');
-
-        if (!current) {
-            return;
-        }
-
-        var channel = getTestChannel();
-
-        if (!channel) {
-            return;
-        }
-
-        var tested = pageConfig.proxies.filter(function (p) {
-            return p.lastTest && p.lastTest.channel === channel;
-        });
-
-        if (!tested.length) {
-            current.textContent = 'Auto-test en cours…';
-            return;
-        }
-
-        var ok = tested.filter(function (p) {
-            return p.lastTest.ok;
-        });
-
-        var best = ok.length ? ok[0] : null;
-
-        if (best) {
-            current.textContent =
-                '✅ ' + ok.length + ' OK · meilleur : ' +
-                best.name + ' (' + best.lastTest.latency + ' ms)';
-        } else {
-            current.textContent = '❌ Aucun proxy fonctionnel pour : ' + channel;
-        }
-
-    }
-
-
     // Affiche le proxy réellement utilisé par le Worker pour la
     // lecture en cours (remonté via BroadcastChannel), à ne pas
     // confondre avec les résultats de l'auto-test ci-dessus.
@@ -2969,25 +4666,41 @@ document.addEventListener(
             return;
         }
 
-        var el =
+        var hero =
             dashboard.querySelector(
-                '.tp9-active-proxy'
+                '.tp9-hero'
             );
 
-        if (!el) {
+        if (!hero) {
             return;
         }
 
-        var channel =
-            getTestChannel();
+        var valueEl = hero.querySelector('.tp9-hero-value');
+        var metaEl = hero.querySelector('.tp9-hero-meta');
 
+        var channel = getTestChannel();
+
+        hero.classList.remove(
+            'tp9-hero-live',
+            'tp9-hero-direct',
+            'tp9-hero-idle'
+        );
+
+        // Rien remonté par le Worker pour CETTE chaîne : la lecture
+        // n'a pas encore démarré. On le dit plutôt que de masquer la
+        // carte — un haut de menu qui apparaît et disparaît ferait
+        // sauter tout le reste sous le curseur.
         if (
             !activeProxyInfo ||
             !channel ||
             activeProxyInfo.channel !== channel
         ) {
 
-            el.textContent = '';
+            hero.classList.add('tp9-hero-idle');
+
+            valueEl.textContent = 'En attente du flux…';
+
+            metaEl.textContent = '';
 
             return;
 
@@ -2995,16 +4708,34 @@ document.addEventListener(
 
         if (activeProxyInfo.direct) {
 
-            el.textContent =
-                '📡 Lecture actuelle : Twitch (direct, aucun proxy)';
+            hero.classList.add('tp9-hero-direct');
 
-        } else {
+            valueEl.textContent = 'Twitch en direct';
 
-            el.textContent =
-                '📡 Lecture actuelle : ' +
-                activeProxyInfo.proxyName;
+            metaEl.textContent = 'aucun relais';
+
+            return;
 
         }
+
+        hero.classList.add('tp9-hero-live');
+
+        valueEl.textContent = activeProxyInfo.proxyName;
+
+        // Latence du dernier test de CE relais : la seule mesure
+        // qu'on ait sur lui, et ce qui rend la carte utile plutôt
+        // que décorative.
+        var proxy =
+            pageConfig.proxies.find(
+                function (p) {
+                    return p.id === activeProxyInfo.proxyId;
+                }
+            );
+
+        metaEl.textContent =
+            (proxy && proxy.lastTest && proxy.lastTest.ok)
+                ? proxy.lastTest.latency + ' ms'
+                : '';
 
     }
 
@@ -3419,6 +5150,407 @@ function showAddProxyForm() {
     }
 
 
+    // Le pictogramme 🗑 s'affiche en carré vide sur le système de
+    // l'utilisateur, comme 🗓 avant lui : on réutilise l'icône
+    // vectorielle déjà employée pour supprimer un proxy
+    // personnalisé, identique partout et sans dépendance aux polices
+    // emoji.
+    function trashIconSVG(size) {
+
+        return (
+            '<svg width="' + size + '" height="' + size + '"' +
+            ' viewBox="0 0 24 24" fill="none" stroke="currentColor"' +
+            ' stroke-width="2.2" stroke-linecap="round"' +
+            ' stroke-linejoin="round" aria-hidden="true">' +
+                '<path d="M4 7h16"/>' +
+                '<path d="M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/>' +
+                '<path d="M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13"/>' +
+                '<path d="M10 11v6"/>' +
+                '<path d="M14 11v6"/>' +
+            '</svg>'
+        );
+
+    }
+
+
+    // ------------------------------------------------------------
+    // INFOBULLES MAISON
+    // ------------------------------------------------------------
+    //
+    // Les attributs `title` du navigateur ont trois défauts ici :
+    // ils sont dessinés par le navigateur (donc impossibles à
+    // styler), ils n'apparaissent qu'après environ une seconde, et
+    // surtout ils disparaissent dès que le dashboard se rafraîchit
+    // en silence — renderStatsDashboard(true) remplace tout le
+    // contenu, donc l'élément survolé est détruit sous le curseur
+    // (et son mouseleave ne part jamais).
+    //
+    // On les remplace par un attribut `data-tp9-tip` (+ un
+    // `data-tp9-tip-sub` facultatif pour une seconde ligne) et une
+    // bulle unique qui vit HORS du conteneur reconstruit, ancrée
+    // au-dessus de l'élément qu'elle décrit.
+
+    var tooltipElement = null;
+    var tooltipTarget = null;
+
+    // Dernière position connue du curseur : sert à retrouver
+    // l'élément survolé après un rafraîchissement silencieux.
+    var tooltipPointer = { x: -1, y: -1 };
+
+    function ensureTooltip() {
+
+        if (tooltipElement) {
+            return tooltipElement;
+        }
+
+        // Feuille de style autonome : la bulle sert aussi bien au
+        // popup qu'au dashboard, qui n'injectent pas le même CSS.
+        if (!document.getElementById('tp9-tip-style')) {
+
+            var style = document.createElement('style');
+
+            style.id = 'tp9-tip-style';
+
+            style.textContent = `
+
+                #tp9-tip {
+
+                    position: fixed;
+
+                    left: 0;
+                    top: 0;
+
+                    z-index: 2147483647;
+
+                    max-width: 260px;
+
+                    padding: 6px 10px;
+
+                    border-radius: 8px;
+
+                    background: #17171c;
+
+                    border: 1px solid rgba(255,255,255,.12);
+
+                    box-shadow: 0 6px 18px rgba(0,0,0,.45);
+
+                    color: #efeff1;
+
+                    font-family: "Inter", Arial, sans-serif;
+
+                    font-size: 11.5px;
+
+                    line-height: 1.35;
+
+                    pointer-events: none;
+
+                    opacity: 0;
+
+                    transform: translateY(3px);
+
+                    transition: opacity .1s ease, transform .1s ease;
+
+                }
+
+                #tp9-tip.tp9-tip-visible {
+
+                    opacity: 1;
+
+                    transform: none;
+
+                }
+
+                .tp9-tip-title {
+
+                    font-weight: 700;
+
+                    white-space: nowrap;
+
+                }
+
+                .tp9-tip-sub {
+
+                    margin-top: 2px;
+
+                    color: #a9a9b0;
+
+                    font-size: 11px;
+
+                }
+
+                .tp9-tip-sub:empty {
+
+                    display: none;
+
+                }
+
+            `;
+
+            document.head.appendChild(style);
+
+        }
+
+        tooltipElement = document.createElement('div');
+
+        tooltipElement.id = 'tp9-tip';
+
+        tooltipElement.innerHTML =
+            '<div class="tp9-tip-title"></div>' +
+            '<div class="tp9-tip-sub"></div>';
+
+        document.body.appendChild(tooltipElement);
+
+        return tooltipElement;
+
+    }
+
+    function positionTooltip(el, tip) {
+
+        var rect = el.getBoundingClientRect();
+        var tipRect = tip.getBoundingClientRect();
+
+        var left = rect.left + (rect.width - tipRect.width) / 2;
+
+        var top = rect.top - tipRect.height - 8;
+
+        // Pas la place au-dessus (ligne tout en haut du panneau) :
+        // on bascule en dessous plutôt que de sortir de l'écran.
+        if (top < 4) {
+            top = rect.bottom + 8;
+        }
+
+        var maxLeft = window.innerWidth - tipRect.width - 6;
+
+        tip.style.left = Math.max(6, Math.min(left, maxLeft)) + 'px';
+        tip.style.top = top + 'px';
+
+    }
+
+    function showTooltipFor(el) {
+
+        var text = el.getAttribute('data-tp9-tip');
+
+        if (!text) {
+            return;
+        }
+
+        var tip = ensureTooltip();
+
+        // Replacé en dernier dans <body> : garantit qu'il passe
+        // au-dessus du dashboard plein écran, qui peut avoir été
+        // créé après lui et partage le même z-index.
+        if (document.body.lastChild !== tip) {
+            document.body.appendChild(tip);
+        }
+
+        tooltipTarget = el;
+
+        tip.querySelector('.tp9-tip-title').textContent = text;
+
+        tip.querySelector('.tp9-tip-sub').textContent =
+            el.getAttribute('data-tp9-tip-sub') || '';
+
+        tip.classList.add('tp9-tip-visible');
+
+        positionTooltip(el, tip);
+
+    }
+
+    function hideTooltip() {
+
+        tooltipTarget = null;
+
+        if (tooltipElement) {
+            tooltipElement.classList.remove('tp9-tip-visible');
+        }
+
+    }
+
+    // Après un rafraîchissement silencieux, l'élément survolé a été
+    // détruit puis recréé à l'identique : on le retrouve sous le
+    // curseur et on ré-ancre la bulle, au lieu de la laisser
+    // pointer dans le vide ou disparaître.
+    function refreshTooltipAnchor() {
+
+        if (!tooltipTarget || tooltipPointer.x < 0) {
+            return;
+        }
+
+        var under = document.elementFromPoint(
+            tooltipPointer.x,
+            tooltipPointer.y
+        );
+
+        var el = under ? closestElement(under, '[data-tp9-tip]') : null;
+
+        if (el) {
+
+            showTooltipFor(el);
+
+        } else {
+
+            hideTooltip();
+
+        }
+
+    }
+
+    // Écoute déléguée sur un conteneur PERSISTANT : continue donc
+    // de fonctionner sur les éléments recréés à chaque rendu.
+    function attachTooltips(root) {
+
+        if (!root || root.__tp9TipsAttached) {
+            return;
+        }
+
+        root.__tp9TipsAttached = true;
+
+        root.addEventListener('mouseover', function (event) {
+
+            var el = closestElement(event.target, '[data-tp9-tip]');
+
+            if (el && el !== tooltipTarget) {
+                showTooltipFor(el);
+            }
+
+        });
+
+        root.addEventListener('mouseout', function (event) {
+
+            var el = closestElement(event.target, '[data-tp9-tip]');
+
+            if (el && el === tooltipTarget) {
+                hideTooltip();
+            }
+
+        });
+
+        root.addEventListener('mousemove', function (event) {
+
+            tooltipPointer.x = event.clientX;
+            tooltipPointer.y = event.clientY;
+
+        });
+
+        root.addEventListener('mouseleave', hideTooltip);
+
+        root.addEventListener('click', hideTooltip);
+
+        // La bulle est en position fixe : un défilement du contenu
+        // la laisserait accrochée dans le vide.
+        root.addEventListener('scroll', hideTooltip, true);
+
+    }
+
+
+    // ------------------------------------------------------------
+    // HALO QUI SUIT LE CURSEUR DANS LES BOUTONS
+    // ------------------------------------------------------------
+    //
+    // Le survol d'un bouton éclairait toute sa surface d'un coup.
+    // Ici la lumière se place SOUS le curseur et le suit : on écrit
+    // sa position (en pixels, relative au bouton) dans --mx / --my,
+    // et le CSS n'a plus qu'à y centrer un dégradé radial.
+    //
+    // Écoute déléguée sur les conteneurs PERSISTANTS, comme pour les
+    // infobulles : le contenu du dashboard est reconstruit en
+    // permanence, poser un écouteur sur chaque bouton serait à
+    // refaire à chaque rendu.
+    //
+    // Cette liste doit rester alignée avec les sélecteurs du bloc
+    // « HALO QUI SUIT LE CURSEUR » des deux feuilles de style.
+    var SPOTLIGHT_SELECTOR = [
+        '#tp9-player-button',
+        '.tp9-close',
+        '.tp9-update-btn',
+        '.tp9-open-stats',
+        '.tp9-actions button',
+        '.tp9-add-proxy',
+        '.tp9-unquarantine',
+        '.tp9-delete',
+        '.tp9-add-form-actions button',
+        '.tp9-toast-btn',
+        '.tp9-toast-close',
+        '.tp9s-nav-item',
+        '.tp9s-close-btn',
+        '.tp9s-topbar-actions button',
+        '.tp9s-panel-link',
+        '.tp9s-chart-range-btn',
+        '.tp9s-backup-btn',
+        '.tp9s-clear-logs',
+        '.tp9s-msg-count',
+        '.tp9s-streamer-delete',
+        '.tp9-chat-modal-close'
+    ].join(',');
+
+    // Une seule écriture de style par frame, pour tout le script :
+    // un mousemove part à chaque pixel parcouru, et rien ne sert de
+    // repositionner le halo plus souvent que le navigateur ne
+    // repeint.
+    var spotlightPending = null;
+    var spotlightFrame = null;
+
+    function applySpotlight() {
+
+        spotlightFrame = null;
+
+        if (!spotlightPending) {
+            return;
+        }
+
+        var el = spotlightPending.el;
+
+        var rect = el.getBoundingClientRect();
+
+        if (rect.width) {
+
+            el.style.setProperty(
+                '--mx',
+                (spotlightPending.x - rect.left) + 'px'
+            );
+
+            el.style.setProperty(
+                '--my',
+                (spotlightPending.y - rect.top) + 'px'
+            );
+
+        }
+
+        spotlightPending = null;
+
+    }
+
+    function attachSpotlight(root) {
+
+        if (!root || root.__tp9SpotAttached) {
+            return;
+        }
+
+        root.__tp9SpotAttached = true;
+
+        root.addEventListener('mousemove', function (event) {
+
+            var el = closestElement(event.target, SPOTLIGHT_SELECTOR);
+
+            if (!el) {
+                return;
+            }
+
+            spotlightPending = {
+                el: el,
+                x: event.clientX,
+                y: event.clientY
+            };
+
+            if (!spotlightFrame) {
+                spotlightFrame = requestAnimationFrame(applySpotlight);
+            }
+
+        });
+
+    }
+
+
     function escapeHTML(text) {
 
         return String(text)
@@ -3472,8 +5604,7 @@ function showAddProxyForm() {
             '<span class="tp9-update-badge" style="display:none;"></span>';
 
 
-        dashboardButton.title =
-    'Twitch Proxy Manager';
+        dashboardButton.dataset.tp9Tip = 'Twitch Proxy Manager';
 
 dashboardButton.style.visibility =
     'hidden';
@@ -3500,6 +5631,10 @@ dashboardButton.style.visibility =
         document.body.appendChild(
             dashboardButton
         );
+
+        attachTooltips(dashboardButton);
+
+        attachSpotlight(dashboardButton);
 
 
         createDashboard();
@@ -3671,6 +5806,43 @@ dashboardButton.style.visibility =
     // on navigue ailleurs sur le site, ou qu'on scroll sur la page
     // de la chaîne) est toujours affiché en "position: fixed" et
     // dans un format nettement plus petit que le lecteur principal.
+    function getFloatingPlayerContainer(video) {
+
+        try {
+
+            var element = video;
+
+            while (
+                element &&
+                element !== document.body
+            ) {
+
+                var computed =
+                    window.getComputedStyle(
+                        element
+                    );
+
+                if (
+                    computed &&
+                    computed.position === 'fixed'
+                ) {
+
+                    return element;
+
+                }
+
+                element =
+                    element.parentElement;
+
+            }
+
+        } catch (e) {}
+
+        return null;
+
+    }
+
+
     function isMiniPlayerVideo(video) {
 
         try {
@@ -3680,31 +5852,7 @@ dashboardButton.style.visibility =
 
             if (rect.width < 500) {
 
-                var element = video;
-
-                while (
-                    element &&
-                    element !== document.body
-                ) {
-
-                    var computed =
-                        window.getComputedStyle(
-                            element
-                        );
-
-                    if (
-                        computed &&
-                        computed.position === 'fixed'
-                    ) {
-
-                        return true;
-
-                    }
-
-                    element =
-                        element.parentElement;
-
-                }
+                return !!getFloatingPlayerContainer(video);
 
             }
 
@@ -3909,6 +6057,209 @@ dashboardButton.style.visibility =
 
         dashboard.style.display =
             'none';
+
+    }
+
+
+    // ============================================================
+    // ALERTE "LECTURE DIRECTE" (= pubs de retour)
+    // ============================================================
+    //
+    // Quand tous les proxys échouent, le Worker bascule sur Twitch en
+    // direct : c'est le seul moment où les pubs reviennent, donc
+    // l'info la plus importante du script — elle ne doit pas rester
+    // enterrée dans les logs d'un dashboard fermé.
+
+    var toastElement = null;
+    var toastTimer = null;
+    var toastShowingDirect = false;
+
+    // Un même stream peut rebasculer en direct plusieurs fois de
+    // suite : on ne réalerte pas plus d'une fois par quart d'heure
+    // pour la même chaîne.
+    var DIRECT_TOAST_COOLDOWN_MS = 15 * 60 * 1000;
+    var lastDirectToastAt = {};
+
+    function ensureToast() {
+
+        if (toastElement) {
+            return toastElement;
+        }
+
+        // Idempotent : l'onglet dashboard n'appelle jamais
+        // createDashboard(), donc le CSS du toast n'y serait pas
+        // injecté et le toast s'afficherait sans aucun style.
+        injectDashboardCSS();
+
+        toastElement = document.createElement('div');
+        toastElement.id = 'tp9-toast';
+
+        toastElement.innerHTML =
+            '<div class="tp9-toast-icon"></div>' +
+            '<div class="tp9-toast-body">' +
+                '<div class="tp9-toast-title"></div>' +
+                '<div class="tp9-toast-text"></div>' +
+                '<div class="tp9-toast-actions"></div>' +
+            '</div>' +
+            '<button type="button" class="tp9-toast-close" aria-label="Fermer">×</button>';
+
+        toastElement
+            .querySelector('.tp9-toast-close')
+            .addEventListener('click', hideToast);
+
+        attachSpotlight(toastElement);
+
+        document.body.appendChild(toastElement);
+
+        return toastElement;
+
+    }
+
+    function hideToast() {
+
+        if (toastTimer) {
+
+            clearTimeout(toastTimer);
+
+            toastTimer = null;
+
+        }
+
+        toastShowingDirect = false;
+
+        if (toastElement) {
+            toastElement.classList.remove('tp9-toast-visible');
+        }
+
+    }
+
+    function showToast(options) {
+
+        var toast = ensureToast();
+
+        toast.classList.toggle('tp9-toast-ok', !!options.ok);
+
+        toast.querySelector('.tp9-toast-icon').textContent = options.icon;
+        toast.querySelector('.tp9-toast-title').textContent = options.title;
+        toast.querySelector('.tp9-toast-text').textContent = options.text;
+
+        var actions = toast.querySelector('.tp9-toast-actions');
+
+        actions.innerHTML = '';
+
+        (options.actions || []).forEach(function (action) {
+
+            var button = document.createElement('button');
+
+            button.type = 'button';
+            button.className = 'tp9-toast-btn';
+            button.textContent = action.label;
+
+            button.addEventListener('click', function () {
+                action.onClick(button);
+            });
+
+            actions.appendChild(button);
+
+        });
+
+        actions.style.display = (options.actions || []).length ? 'flex' : 'none';
+
+        // Relance l'animation d'entrée même si le toast était déjà
+        // affiché (ex: direct -> proxy rétabli).
+        toast.classList.remove('tp9-toast-visible');
+        void toast.offsetWidth;
+        toast.classList.add('tp9-toast-visible');
+
+        if (toastTimer) {
+            clearTimeout(toastTimer);
+        }
+
+        toastTimer = setTimeout(hideToast, options.duration || 9000);
+
+    }
+
+    function showDirectPlaybackToast(channel) {
+
+        if (isDashboardOnlyTab || !document.body) {
+            return;
+        }
+
+        var now = Date.now();
+
+        if (
+            lastDirectToastAt[channel] &&
+            (now - lastDirectToastAt[channel]) < DIRECT_TOAST_COOLDOWN_MS
+        ) {
+            return;
+        }
+
+        lastDirectToastAt[channel] = now;
+
+        showToast({
+
+            icon: '⚠️',
+
+            title: 'Lecture directe Twitch',
+
+            text:
+                'Aucun relais n\'a répondu pour ' + channel +
+                ' : le flux passe par Twitch, les pubs peuvent revenir.',
+
+            duration: 12000,
+
+            actions: [
+                {
+                    label: '🧪 Retester les relais',
+                    onClick: function (button) {
+
+                        if (testInProgress) {
+                            return;
+                        }
+
+                        button.disabled = true;
+                        button.textContent = '⏳ Test en cours...';
+
+                        testAllProxies().finally(function () {
+
+                            hideToast();
+
+                        });
+
+                    }
+                }
+            ]
+
+        });
+
+        toastShowingDirect = true;
+
+    }
+
+    // Un relais reprend la main alors qu'on venait d'alerter : on
+    // referme la boucle plutôt que de laisser l'avertissement à
+    // l'écran.
+    function notifyProxyRecovered(proxyName) {
+
+        if (!toastShowingDirect) {
+            return;
+        }
+
+        showToast({
+
+            icon: '✅',
+
+            title: 'Relais rétabli',
+
+            text: 'Le flux repasse par ' + proxyName + '.',
+
+            ok: true,
+
+            duration: 5000
+
+        });
+
+        toastShowingDirect = false;
 
     }
 
@@ -4339,6 +6690,56 @@ dashboardButton.style.visibility =
             }
 
 
+            .tp9-backup-banner {
+
+                display: flex;
+
+                align-items: center;
+
+                gap: 10px;
+
+                padding: 10px 12px;
+
+                margin-bottom: 10px;
+
+                border-radius: 9px;
+
+                background:
+                    linear-gradient(135deg, rgba(145,71,255,.18), rgba(145,71,255,.05));
+
+                border: 1px solid rgba(145,71,255,.35);
+
+            }
+
+
+            .tp9-backup-banner .tp9-update-version {
+
+                color: #bf94ff;
+
+            }
+
+
+            .tp9-backup-banner .tp9-update-hint {
+
+                color: #9d8ac2;
+
+            }
+
+
+            .tp9-backup-banner .tp9-update-btn {
+
+                background: #9147ff;
+
+            }
+
+
+            .tp9-backup-banner .tp9-update-btn:hover {
+
+                background: #a970ff;
+
+            }
+
+
             .tp9-section-title {
 
                 font-size: 10px;
@@ -4586,6 +6987,71 @@ dashboardButton.style.visibility =
                 color: #999;
 
                 background: rgba(255,255,255,.05);
+
+            }
+
+
+            .tp9-status-quarantine {
+
+                color: #ffcf7a;
+
+                background: rgba(255,207,122,.14);
+
+            }
+
+
+            .tp9-proxy-quarantined::before {
+
+                background: #ffcf7a !important;
+
+            }
+
+
+            .tp9-unquarantine {
+
+                width: 28px;
+                height: 28px;
+
+                margin-right: 6px;
+
+                padding: 0;
+
+                display: flex;
+
+                align-items: center;
+
+                justify-content: center;
+
+                border: 1px solid rgba(255,207,122,.25);
+
+                border-radius: 50%;
+
+                background: rgba(255,207,122,.1);
+
+                font-size: 12px;
+
+                cursor: pointer;
+
+                transition:
+                    background-color .15s ease,
+                    border-color .15s ease,
+                    transform .1s ease;
+
+            }
+
+
+            .tp9-unquarantine:hover {
+
+                background: rgba(255,207,122,.22);
+
+                border-color: rgba(255,207,122,.45);
+
+            }
+
+
+            .tp9-unquarantine:active {
+
+                transform: scale(.92);
 
             }
 
@@ -5116,77 +7582,6 @@ dashboardButton.style.visibility =
             }
 
 
-            .tp9-current-card {
-
-                display: flex;
-
-                align-items: center;
-
-                gap: 9px;
-
-                margin-top: 12px;
-
-                padding: 10px 12px;
-
-                border-radius: 9px;
-
-                background:
-                    rgba(255,255,255,.04);
-
-                border: 1px solid rgba(255,255,255,.06);
-
-            }
-
-
-            .tp9-current-icon {
-
-                flex: 0 0 auto;
-
-                font-size: 15px;
-
-            }
-
-
-            .tp9-current {
-
-                color: #bbb;
-
-                font-size: 11.5px;
-
-                font-weight: 600;
-
-                line-height: 1.4;
-
-            }
-
-
-            .tp9-active-proxy {
-
-                margin-bottom: 10px;
-
-                padding: 7px 8px;
-
-                border-radius: 6px;
-
-                background:
-                    rgba(145,71,255,.12);
-
-                color: #bf94ff;
-
-                font-size: 11px;
-
-                font-weight: 600;
-
-            }
-
-
-            .tp9-active-proxy:empty {
-
-                display: none;
-
-            }
-
-
             .tp9-actions-secondary {
 
                 margin-top: 7px;
@@ -5490,6 +7885,1225 @@ dashboardButton.style.visibility =
             .tp9-confirm-add:hover {
 
                 filter: brightness(1.1);
+
+            }
+
+
+            /* =====================================================
+               ALERTE LECTURE DIRECTE
+            ===================================================== */
+
+            #tp9-toast {
+
+                display: none;
+
+                position: fixed;
+
+                left: 20px;
+                bottom: 20px;
+
+                z-index: 2147483646;
+
+                max-width: 340px;
+
+                padding: 12px 14px;
+
+                align-items: flex-start;
+
+                gap: 10px;
+
+                border-radius: 12px;
+
+                background: rgba(15,15,15,.97);
+
+                border: 1px solid rgba(255,77,79,.4);
+
+                box-shadow: 0 10px 40px rgba(0,0,0,.6);
+
+                color: #fff;
+
+                font-family: Arial, sans-serif;
+
+                font-size: 12.5px;
+
+                backdrop-filter: blur(12px);
+
+                animation: tp9-toast-in .25s ease;
+
+            }
+
+
+            @keyframes tp9-toast-in {
+
+                from {
+                    opacity: 0;
+                    transform: translateY(10px);
+                }
+
+                to {
+                    opacity: 1;
+                    transform: none;
+                }
+
+            }
+
+
+            .tp9-toast-visible {
+
+                display: flex !important;
+
+            }
+
+
+            .tp9-toast-ok {
+
+                border-color: rgba(0,208,132,.4) !important;
+
+            }
+
+
+            .tp9-toast-icon {
+
+                flex: 0 0 auto;
+
+                font-size: 18px;
+
+                line-height: 1.2;
+
+            }
+
+
+            .tp9-toast-body {
+
+                flex: 1 1 auto;
+
+                min-width: 0;
+
+            }
+
+
+            .tp9-toast-title {
+
+                font-size: 12.5px;
+
+                font-weight: 800;
+
+            }
+
+
+            .tp9-toast-text {
+
+                margin-top: 2px;
+
+                color: #bbb;
+
+                font-size: 11.5px;
+
+                line-height: 1.45;
+
+            }
+
+
+            .tp9-toast-actions {
+
+                display: flex;
+
+                gap: 6px;
+
+                margin-top: 9px;
+
+            }
+
+
+            .tp9-toast-btn {
+
+                border: 1px solid rgba(255,255,255,.12);
+
+                border-radius: 7px;
+
+                padding: 5px 9px;
+
+                background: rgba(255,255,255,.06);
+
+                color: #ddd;
+
+                font-size: 11px;
+
+                font-weight: 700;
+
+                cursor: pointer;
+
+            }
+
+
+            .tp9-toast-btn:hover {
+
+                background: rgba(255,255,255,.12);
+
+            }
+
+
+            .tp9-toast-btn:disabled {
+
+                opacity: .6;
+
+                cursor: not-allowed;
+
+            }
+
+
+            .tp9-toast-close {
+
+                flex: 0 0 auto;
+
+                border: 0;
+
+                padding: 0 2px;
+
+                background: transparent;
+
+                color: #888;
+
+                font-size: 16px;
+
+                line-height: 1;
+
+                cursor: pointer;
+
+            }
+
+
+            .tp9-toast-close:hover {
+
+                color: #fff;
+
+            }
+
+
+            /* =====================================================
+               MICRO-INTERACTIONS
+               -----------------------------------------------------
+               Un seul jeu de variables pour tous les mouvements :
+               il suffit de les neutraliser une fois pour respecter
+               "réduire les animations" du système. Rien d'autre que
+               transform / opacity / box-shadow, donc composé par le
+               GPU et sans recalcul de mise en page — ça compte, le
+               dashboard se reconstruit plusieurs fois par minute.
+            ===================================================== */
+
+            :root {
+
+                --tp9-lift: translateY(-1px);
+                --tp9-press: scale(.97);
+                --tp9-press-wide: scale(.99);
+                --tp9-pop: scale(1.08);
+                --tp9-press-pop: scale(.9);
+                --tp9-slide: translateX(2px);
+
+            }
+
+
+            /* Le bouton flottant : la règle d'origine annulait
+               explicitement toute transformation, celle-ci arrive
+               après et reprend la main. */
+
+            #tp9-player-button {
+
+                transition:
+                    background-color .12s ease,
+                    color .12s ease,
+                    transform .12s ease;
+
+            }
+
+
+            #tp9-player-button:hover {
+
+                transform: var(--tp9-lift);
+
+            }
+
+
+            #tp9-player-button:active {
+
+                transform: var(--tp9-press);
+
+            }
+
+
+            .tp9-close {
+
+                transition: color .12s ease, transform .12s ease;
+
+            }
+
+
+            .tp9-close:hover {
+
+                transform: var(--tp9-pop);
+
+            }
+
+
+            .tp9-close:active {
+
+                transform: var(--tp9-press-pop);
+
+            }
+
+
+            .tp9-actions button:hover {
+
+                transform: var(--tp9-lift);
+
+                box-shadow: 0 3px 10px rgba(0,0,0,.28);
+
+            }
+
+
+            /* Écrit APRÈS le :hover : sans ça le survol, qui
+               s'applique aussi pendant le clic, gagnerait la
+               cascade et l'enfoncement ne se verrait jamais. */
+
+            .tp9-actions button:active {
+
+                transform: var(--tp9-press);
+
+                box-shadow: none;
+
+            }
+
+
+            .tp9-add-proxy {
+
+                transition:
+                    background-color .12s ease,
+                    border-color .12s ease,
+                    color .12s ease,
+                    transform .12s ease;
+
+            }
+
+
+            .tp9-add-proxy:hover {
+
+                transform: var(--tp9-lift);
+
+            }
+
+
+            .tp9-add-proxy:active {
+
+                transform: var(--tp9-press);
+
+            }
+
+
+            .tp9-toggle-row:hover {
+
+                transform: var(--tp9-slide);
+
+            }
+
+
+            .tp9-open-stats:hover {
+
+                filter: brightness(1.08);
+
+                transform: var(--tp9-lift);
+
+                box-shadow: 0 6px 18px rgba(145,71,255,.45);
+
+            }
+
+
+            .tp9-open-stats:active {
+
+                transform: var(--tp9-press);
+
+                box-shadow: 0 2px 8px rgba(145,71,255,.3);
+
+            }
+
+
+            .tp9-confirm-add:hover {
+
+                transform: var(--tp9-lift);
+
+                box-shadow: 0 6px 18px rgba(145,71,255,.4);
+
+            }
+
+
+            .tp9-cancel-add:hover {
+
+                transform: var(--tp9-lift);
+
+            }
+
+
+            .tp9-add-form-actions button:active {
+
+                transform: var(--tp9-press);
+
+            }
+
+
+            .tp9-unquarantine:hover,
+            .tp9-delete:hover {
+
+                transform: var(--tp9-pop);
+
+            }
+
+
+            .tp9-unquarantine:active,
+            .tp9-delete:active {
+
+                transform: var(--tp9-press-pop);
+
+            }
+
+
+            .tp9-update-btn {
+
+                transition:
+                    background-color .12s ease,
+                    transform .12s ease,
+                    box-shadow .12s ease;
+
+            }
+
+
+            .tp9-update-btn:hover {
+
+                transform: var(--tp9-lift);
+
+            }
+
+
+            .tp9-update-btn:active {
+
+                transform: var(--tp9-press);
+
+            }
+
+
+            .tp9-toast-btn {
+
+                transition:
+                    background-color .12s ease,
+                    transform .12s ease;
+
+            }
+
+
+            .tp9-toast-btn:hover {
+
+                transform: var(--tp9-lift);
+
+            }
+
+
+            .tp9-toast-btn:active {
+
+                transform: var(--tp9-press);
+
+            }
+
+
+            .tp9-toast-close {
+
+                transition: color .12s ease, transform .12s ease;
+
+            }
+
+
+            .tp9-toast-close:hover {
+
+                transform: var(--tp9-pop);
+
+            }
+
+
+            .tp9-toast-close:active {
+
+                transform: var(--tp9-press-pop);
+
+            }
+
+
+            @media (prefers-reduced-motion: reduce) {
+
+                :root {
+
+                    --tp9-lift: none;
+                    --tp9-press: none;
+                    --tp9-press-wide: none;
+                    --tp9-pop: none;
+                    --tp9-press-pop: none;
+                    --tp9-slide: none;
+
+                }
+
+                /* Mouvements antérieurs aux variables. */
+
+                .tp9-proxy:hover {
+
+                    transform: none;
+
+                }
+
+            }
+
+            /* =====================================================
+               REDESIGN — relief, dégradés, carte de lecture
+               -----------------------------------------------------
+               Écrit APRÈS tout le reste : à spécificité égale la
+               dernière règle gagne, donc ce bloc reprend la main
+               sans qu'il faille retoucher les règles d'origine.
+
+               Les effets reposent d'abord sur des DÉGRADÉS et des
+               halos, pas seulement sur du mouvement : ils restent
+               donc visibles quand le système demande de réduire les
+               animations (cas fréquent sur Windows, où « Effets
+               d'animation » désactivé neutralisait tout l'ancien
+               jeu de micro-interactions).
+            ===================================================== */
+
+            :root {
+
+                --tp9-lift: translateY(-2px);
+                --tp9-press: scale(.96);
+
+            }
+
+
+            /* ---- ouverture du menu ---- */
+
+            #tp9-dashboard {
+
+                animation: tp9-panel-in .16s ease-out;
+
+            }
+
+
+            @keyframes tp9-panel-in {
+
+                from {
+                    opacity: 0;
+                    transform: translateY(-6px) scale(.985);
+                }
+
+                to {
+                    opacity: 1;
+                    transform: none;
+                }
+
+            }
+
+
+            .tp9-header {
+
+                background:
+                    linear-gradient(180deg, rgba(145,71,255,.16), transparent);
+
+            }
+
+
+            /* =====================================================
+               CARTE DE LECTURE EN COURS
+               -----------------------------------------------------
+               Remplace l'ancienne ligne "📡 Lecture actuelle : ...".
+               Trois états, lisibles d'un coup d'œil sans lire le
+               texte : pastille verte qui pulse (un relais tient le
+               flux), ambre (Twitch en direct, donc les pubs
+               reviennent), grise (rien encore).
+            ===================================================== */
+
+            .tp9-hero {
+
+                display: flex;
+
+                align-items: center;
+
+                gap: 10px;
+
+                margin-bottom: 10px;
+
+                padding: 10px 12px;
+
+                border-radius: 10px;
+
+                background:
+                    linear-gradient(135deg,
+                        rgba(145,71,255,.22),
+                        rgba(145,71,255,.04));
+
+                border: 1px solid rgba(145,71,255,.3);
+
+                box-shadow: inset 0 1px 0 rgba(255,255,255,.06);
+
+            }
+
+
+            .tp9-hero-dot {
+
+                flex: 0 0 auto;
+
+                width: 9px;
+                height: 9px;
+
+                border-radius: 50%;
+
+                background: #6b6b73;
+
+            }
+
+
+            .tp9-hero-text {
+
+                flex: 1 1 auto;
+
+                min-width: 0;
+
+            }
+
+
+            .tp9-hero-label {
+
+                font-size: 9px;
+
+                font-weight: 700;
+
+                letter-spacing: .9px;
+
+                color: #9d8ac2;
+
+            }
+
+
+            .tp9-hero-value {
+
+                margin-top: 2px;
+
+                font-size: 13px;
+
+                font-weight: 700;
+
+                color: #fff;
+
+                white-space: nowrap;
+
+                overflow: hidden;
+
+                text-overflow: ellipsis;
+
+            }
+
+
+            .tp9-hero-meta {
+
+                flex: 0 0 auto;
+
+                padding: 3px 8px;
+
+                border-radius: 999px;
+
+                background: rgba(145,71,255,.18);
+
+                color: #bf94ff;
+
+                font-size: 10.5px;
+
+                font-weight: 700;
+
+            }
+
+
+            .tp9-hero-meta:empty {
+
+                display: none;
+
+            }
+
+
+            .tp9-hero-live {
+
+                background:
+                    linear-gradient(135deg,
+                        rgba(0,208,132,.2),
+                        rgba(0,208,132,.03));
+
+                border-color: rgba(0,208,132,.3);
+
+            }
+
+
+            .tp9-hero-live .tp9-hero-label {
+
+                color: #7fcdae;
+
+            }
+
+
+            .tp9-hero-live .tp9-hero-meta {
+
+                background: rgba(0,208,132,.16);
+
+                color: #7ae8b0;
+
+            }
+
+
+            .tp9-hero-live .tp9-hero-dot {
+
+                background: #00d084;
+
+                animation: tp9-hero-pulse 2.4s ease-out infinite;
+
+            }
+
+
+            @keyframes tp9-hero-pulse {
+
+                0% { box-shadow: 0 0 0 0 rgba(0,208,132,.55); }
+                70% { box-shadow: 0 0 0 8px rgba(0,208,132,0); }
+                100% { box-shadow: 0 0 0 0 rgba(0,208,132,0); }
+
+            }
+
+
+            .tp9-hero-direct {
+
+                background:
+                    linear-gradient(135deg,
+                        rgba(255,207,122,.2),
+                        rgba(255,207,122,.03));
+
+                border-color: rgba(255,207,122,.32);
+
+            }
+
+
+            .tp9-hero-direct .tp9-hero-label {
+
+                color: #d8b47c;
+
+            }
+
+
+            .tp9-hero-direct .tp9-hero-dot {
+
+                background: #ffcf7a;
+
+            }
+
+
+            .tp9-hero-direct .tp9-hero-meta {
+
+                background: rgba(255,207,122,.16);
+
+                color: #ffcf7a;
+
+            }
+
+
+            .tp9-hero-idle {
+
+                background:
+                    linear-gradient(135deg,
+                        rgba(255,255,255,.07),
+                        rgba(255,255,255,.02));
+
+                border-color: rgba(255,255,255,.08);
+
+            }
+
+
+            .tp9-hero-idle .tp9-hero-label {
+
+                color: #8a8a93;
+
+            }
+
+
+            .tp9-hero-idle .tp9-hero-value {
+
+                color: #aaa;
+
+            }
+
+
+            /* =====================================================
+               BOUTON DASHBOARD — remonté juste sous la carte
+            ===================================================== */
+
+            .tp9-open-stats {
+
+                display: flex;
+
+                align-items: center;
+
+                justify-content: center;
+
+                gap: 7px;
+
+                margin: 0 0 12px;
+
+                padding: 11px;
+
+                background:
+                    linear-gradient(120deg, #a970ff, #772ce8 55%, #5b21b6);
+
+                /* Le dégradé est deux fois plus large que le bouton :
+                   au survol on le fait GLISSER au lieu d'éclaircir
+                   la couleur, ce qui se voit nettement plus. */
+
+                background-size: 200% 100%;
+
+                background-position: 0 0;
+
+                transition:
+                    background-position .35s ease,
+                    box-shadow .15s ease,
+                    transform .12s ease;
+
+            }
+
+
+            .tp9-open-stats:hover {
+
+                filter: none;
+
+                background-position: 100% 0;
+
+                transform: var(--tp9-lift);
+
+                box-shadow: 0 8px 22px rgba(145,71,255,.5);
+
+            }
+
+
+            /* =====================================================
+               BOUTONS D'ACTION
+            ===================================================== */
+
+            .tp9-actions button {
+
+                background:
+                    linear-gradient(135deg,
+                        rgba(255,255,255,.1),
+                        rgba(255,255,255,.03));
+
+            }
+
+
+            .tp9-actions button:hover {
+
+                background:
+                    linear-gradient(135deg,
+                        rgba(255,255,255,.18),
+                        rgba(255,255,255,.06));
+
+                border-color: rgba(255,255,255,.18);
+
+                transform: var(--tp9-lift);
+
+                box-shadow: 0 5px 16px rgba(0,0,0,.38);
+
+            }
+
+
+            .tp9-test {
+
+                background:
+                    linear-gradient(135deg,
+                        rgba(145,71,255,.34),
+                        rgba(145,71,255,.1)) !important;
+
+                border-color: rgba(145,71,255,.45) !important;
+
+            }
+
+
+            .tp9-test:hover {
+
+                background:
+                    linear-gradient(135deg,
+                        rgba(145,71,255,.5),
+                        rgba(145,71,255,.18)) !important;
+
+                border-color: rgba(145,71,255,.6) !important;
+
+                box-shadow: 0 5px 18px rgba(145,71,255,.35);
+
+            }
+
+
+            .tp9-reset:hover {
+
+                background:
+                    linear-gradient(135deg,
+                        rgba(255,70,70,.3),
+                        rgba(255,70,70,.07)) !important;
+
+                border-color: rgba(255,70,70,.45) !important;
+
+                box-shadow: 0 5px 18px rgba(255,70,70,.25);
+
+            }
+
+
+            .tp9-export:hover {
+
+                border-color: rgba(122,210,255,.4);
+
+                color: #7ad2ff;
+
+                box-shadow: 0 5px 18px rgba(31,156,240,.22);
+
+            }
+
+
+            .tp9-import:hover {
+
+                border-color: rgba(122,232,176,.4);
+
+                color: #7ae8b0;
+
+                box-shadow: 0 5px 18px rgba(0,208,132,.22);
+
+            }
+
+
+            .tp9-add-proxy:hover {
+
+                background:
+                    linear-gradient(135deg,
+                        rgba(145,71,255,.16),
+                        rgba(145,71,255,.03));
+
+                border-color: rgba(145,71,255,.4);
+
+                color: #d9c2ff;
+
+            }
+
+
+            /* =====================================================
+               LIGNES DE PROXY
+            ===================================================== */
+
+            .tp9-proxy::before {
+
+                transition: width .15s ease;
+
+            }
+
+
+            .tp9-proxy:hover {
+
+                background:
+                    linear-gradient(90deg,
+                        color-mix(in srgb, var(--accent) 18%, transparent),
+                        rgba(255,255,255,.05) 60%);
+
+            }
+
+
+            .tp9-proxy:hover::before {
+
+                width: 5px;
+
+            }
+
+
+            .tp9-switch input:checked + .tp9-switch-track {
+
+                background:
+                    linear-gradient(135deg, #a970ff, #772ce8);
+
+                box-shadow: 0 0 10px rgba(145,71,255,.45);
+
+            }
+
+
+            .tp9-toggle-row:hover {
+
+                background:
+                    linear-gradient(90deg,
+                        rgba(145,71,255,.12),
+                        rgba(255,255,255,.03) 70%);
+
+                border-color: rgba(145,71,255,.22);
+
+            }
+
+
+            /* =====================================================
+               ÉTATS ENFONCÉS
+               -----------------------------------------------------
+               Toujours APRÈS les :hover de ce bloc : le survol reste
+               actif pendant le clic et, à spécificité égale, la
+               dernière règle écrite gagne — un :active placé avant
+               ne se verrait jamais.
+            ===================================================== */
+
+            .tp9-actions button:active,
+            .tp9-open-stats:active,
+            .tp9-add-proxy:active {
+
+                transform: var(--tp9-press);
+
+                box-shadow: none;
+
+            }
+
+
+            @media (prefers-reduced-motion: reduce) {
+
+                :root {
+
+                    --tp9-lift: none;
+                    --tp9-press: none;
+
+                }
+
+                #tp9-dashboard {
+
+                    animation: none;
+
+                }
+
+                /* La pastille reste identifiable sans clignoter. */
+
+                .tp9-hero-live .tp9-hero-dot {
+
+                    animation: none;
+
+                    box-shadow: 0 0 0 3px rgba(0,208,132,.25);
+
+                }
+
+            }
+
+            /* =====================================================
+               FINITIONS — défilement et titres
+               -----------------------------------------------------
+               Le dashboard avait déjà sa barre de défilement fine,
+               pas le menu : il gardait celle du système, large et
+               grise, au milieu d'un panneau sombre.
+            ===================================================== */
+
+            .tp9-content::-webkit-scrollbar {
+
+                width: 8px;
+
+            }
+
+
+            .tp9-content::-webkit-scrollbar-track {
+
+                background: transparent;
+
+            }
+
+
+            .tp9-content::-webkit-scrollbar-thumb {
+
+                border-radius: 8px;
+
+                background: rgba(255,255,255,.12);
+
+            }
+
+
+            .tp9-content::-webkit-scrollbar-thumb:hover {
+
+                background: rgba(145,71,255,.45);
+
+            }
+
+
+            /* Firefox n'a pas les pseudo-éléments ci-dessus. */
+
+            .tp9-content {
+
+                scrollbar-width: thin;
+
+                scrollbar-color: rgba(255,255,255,.18) transparent;
+
+            }
+
+
+            /* Petit trait accentué devant « 📡 PROXYS » et
+               « ⚙️ RÉGLAGES » : structure la colonne sans ajouter
+               une ligne de séparation de plus. */
+
+            .tp9-section-title {
+
+                display: flex;
+
+                align-items: center;
+
+                gap: 7px;
+
+                font-weight: 700;
+
+            }
+
+
+            .tp9-section-title::before {
+
+                content: '';
+
+                flex: 0 0 auto;
+
+                width: 3px;
+                height: 11px;
+
+                border-radius: 2px;
+
+                background:
+                    linear-gradient(180deg, #a970ff, #772ce8);
+
+            }
+
+
+            /* La ligne des proxys porte aussi le compteur, calé à
+               droite : son ::before ne doit pas casser ce placement. */
+
+            .tp9-proxy-title-row {
+
+                justify-content: flex-start;
+
+            }
+
+
+            .tp9-proxy-title-row .tp9-proxy-count {
+
+                margin-left: auto;
+
+            }
+
+            /* =====================================================
+               HALO QUI SUIT LE CURSEUR
+               -----------------------------------------------------
+               attachSpotlight() écrit la position de la souris dans
+               --mx / --my ; le ::after n'est qu'un dégradé radial
+               centré dessus.
+
+               Ni transform ni animation : l'effet reste donc ENTIER
+               quand le système demande de réduire les animations —
+               c'est justement là que les anciens survols, qui ne
+               reposaient que sur du mouvement, disparaissaient.
+
+               Pas besoin de overflow: hidden : le ::after est calé
+               sur inset: 0 avec border-radius: inherit, il épouse
+               donc déjà les coins du bouton. C'est important pour le
+               bouton flottant, dont la pastille de mise à jour
+               dépasse volontairement du cadre et serait rognée.
+            ===================================================== */
+
+            .tp9-close,
+            .tp9-update-btn,
+            .tp9-open-stats,
+            .tp9-actions button,
+            .tp9-add-proxy,
+            .tp9-unquarantine,
+            .tp9-delete,
+            .tp9-add-form-actions button,
+            .tp9-toast-btn,
+            .tp9-toast-close {
+
+                position: relative;
+
+            }
+
+
+            #tp9-player-button::after,
+            .tp9-close::after,
+            .tp9-update-btn::after,
+            .tp9-open-stats::after,
+            .tp9-actions button::after,
+            .tp9-add-proxy::after,
+            .tp9-unquarantine::after,
+            .tp9-delete::after,
+            .tp9-add-form-actions button::after,
+            .tp9-toast-btn::after,
+            .tp9-toast-close::after {
+
+                content: '';
+
+                position: absolute;
+
+                inset: 0;
+
+                border-radius: inherit;
+
+                pointer-events: none;
+
+                opacity: 0;
+
+                background:
+                    radial-gradient(
+                        circle var(--tp9-spot, 110px)
+                            at var(--mx, 50%) var(--my, 50%),
+                        rgba(255,255,255,.2),
+                        rgba(255,255,255,0) 72%);
+
+                transition: opacity .15s ease;
+
+            }
+
+
+            #tp9-player-button:hover::after,
+            .tp9-close:hover::after,
+            .tp9-update-btn:hover::after,
+            .tp9-open-stats:hover::after,
+            .tp9-actions button:hover::after,
+            .tp9-add-proxy:hover::after,
+            .tp9-unquarantine:hover::after,
+            .tp9-delete:hover::after,
+            .tp9-add-form-actions button:hover::after,
+            .tp9-toast-btn:hover::after,
+            .tp9-toast-close:hover::after {
+
+                opacity: 1;
+
+            }
+
+
+            /* Un halo de 110 px sur un bouton rond de 28 px
+               reviendrait à éclaircir toute sa surface : sur les
+               petits, on resserre pour qu'il reste un point lumineux
+               qui se déplace. */
+
+            .tp9-close,
+            .tp9-unquarantine,
+            .tp9-delete,
+            .tp9-toast-close {
+
+                --tp9-spot: 26px;
+
+            }
+
+
+            #tp9-player-button {
+
+                --tp9-spot: 34px;
+
+            }
+
+
+            /* Un bouton désactivé ne réagit plus au survol : son halo
+               ne doit pas laisser croire le contraire. */
+
+            .tp9-actions button:disabled::after,
+            .tp9-toast-btn:disabled::after {
+
+                opacity: 0 !important;
 
             }
 
@@ -6056,6 +9670,24 @@ dashboardButton.style.visibility =
             }
 
 
+            .tp9s-note-ok {
+
+                background: rgba(0,208,132,.08);
+
+                border-color: rgba(0,208,132,.22);
+
+                color: #a6e3c6;
+
+            }
+
+
+            .tp9s-note-ok strong {
+
+                color: #dcfff0;
+
+            }
+
+
             .tp9s-panel {
 
                 background: rgba(255,255,255,.03);
@@ -6202,7 +9834,25 @@ dashboardButton.style.visibility =
 
             .tp9s-table-row-relais {
 
-                grid-template-columns: 34px 1.4fr 1fr 1fr 1fr 1fr 1.2fr;
+                grid-template-columns: 34px 1.4fr .7fr 1fr 1fr .8fr .9fr 1.2fr;
+
+            }
+
+
+            .tp9s-td-score {
+
+                font-weight: 800;
+
+                color: #bf94ff;
+
+            }
+
+
+            .tp9s-table-head .tp9s-td-score {
+
+                font-weight: 700;
+
+                color: #888;
 
             }
 
@@ -6306,9 +9956,92 @@ dashboardButton.style.visibility =
             }
 
 
+            .tp9s-clear-logs {
+
+                display: inline-flex;
+
+                align-items: center;
+
+                gap: 6px;
+
+            }
+
+
             .tp9s-clear-logs:hover {
 
                 background: rgba(255,70,70,.12);
+
+            }
+
+
+            .tp9s-clear-logs svg,
+            .tp9s-topbar-actions button svg {
+
+                display: block;
+
+            }
+
+
+            .tp9s-table-row-streamers {
+
+                grid-template-columns: 34px 1.4fr 1fr 1fr 1fr 1.2fr 44px;
+
+            }
+
+
+            .tp9s-streamer-delete {
+
+                width: 26px;
+                height: 26px;
+
+                padding: 0;
+
+                display: flex;
+
+                align-items: center;
+
+                justify-content: center;
+
+                border: 1px solid rgba(255,255,255,.08);
+
+                border-radius: 50%;
+
+                background: rgba(255,255,255,.04);
+
+                color: #8a7580;
+
+                cursor: pointer;
+
+                transition:
+                    background-color .15s ease,
+                    border-color .15s ease,
+                    color .15s ease,
+                    transform .1s ease;
+
+            }
+
+
+            .tp9s-streamer-delete:hover {
+
+                background: rgba(255,70,70,.16);
+
+                border-color: rgba(255,70,70,.4);
+
+                color: #ff8a8a;
+
+            }
+
+
+            .tp9s-streamer-delete:active {
+
+                transform: scale(.92);
+
+            }
+
+
+            .tp9s-session-row {
+
+                grid-template-columns: 150px 1fr 76px;
 
             }
 
@@ -6855,6 +10588,212 @@ dashboardButton.style.visibility =
 
             /* ---- historique des messages (bouton + modale) ---- */
 
+            .tp9s-backup-status {
+
+                display: flex;
+
+                align-items: flex-start;
+
+                gap: 14px;
+
+                padding-bottom: 14px;
+
+                margin-bottom: 14px;
+
+                border-bottom: 1px solid rgba(255,255,255,.06);
+
+            }
+
+
+            .tp9s-backup-icon {
+
+                flex: 0 0 auto;
+
+                width: 40px;
+                height: 40px;
+
+                border-radius: 11px;
+
+                display: flex;
+
+                align-items: center;
+
+                justify-content: center;
+
+                font-size: 19px;
+
+                background: color-mix(in srgb, var(--accent, #9147ff) 20%, transparent);
+
+            }
+
+
+            .tp9s-backup-desc {
+
+                margin-top: 5px;
+
+                color: #999;
+
+                font-size: 12px;
+
+                line-height: 1.5;
+
+                max-width: 640px;
+
+            }
+
+
+            .tp9s-backup-hint {
+
+                margin-top: 9px;
+
+                padding: 8px 11px;
+
+                border-radius: 8px;
+
+                border-left: 2px solid var(--accent, #9147ff);
+
+                background: rgba(255,255,255,.04);
+
+                color: #a9a9a9;
+
+                font-size: 11.5px;
+
+                line-height: 1.45;
+
+                max-width: 620px;
+
+            }
+
+
+            .tp9s-backup-meta {
+
+                display: flex;
+
+                flex-wrap: wrap;
+
+                gap: 28px;
+
+                margin-bottom: 16px;
+
+            }
+
+
+            .tp9s-backup-meta-label {
+
+                display: block;
+
+                font-size: 10px;
+
+                font-weight: 700;
+
+                letter-spacing: .5px;
+
+                color: #777;
+
+            }
+
+
+            .tp9s-backup-meta-value {
+
+                display: block;
+
+                margin-top: 3px;
+
+                font-size: 12.5px;
+
+                font-weight: 600;
+
+                color: #ddd;
+
+            }
+
+
+            .tp9s-backup-actions {
+
+                display: flex;
+
+                flex-wrap: wrap;
+
+                gap: 8px;
+
+            }
+
+
+            .tp9s-backup-btn {
+
+                border: 1px solid rgba(255,255,255,.1);
+
+                border-radius: 9px;
+
+                padding: 9px 14px;
+
+                background: rgba(255,255,255,.05);
+
+                color: #ddd;
+
+                font-family: inherit;
+
+                font-size: 12.5px;
+
+                font-weight: 600;
+
+                cursor: pointer;
+
+                transition:
+                    background-color .12s ease,
+                    border-color .12s ease,
+                    transform .1s ease;
+
+            }
+
+
+            .tp9s-backup-btn:hover {
+
+                background: rgba(255,255,255,.1);
+
+                border-color: rgba(255,255,255,.18);
+
+            }
+
+
+            .tp9s-backup-btn:active {
+
+                transform: scale(.97);
+
+            }
+
+
+            .tp9s-backup-primary {
+
+                background: linear-gradient(135deg, #9147ff, #772ce8) !important;
+
+                border-color: transparent !important;
+
+                color: #fff !important;
+
+                box-shadow: 0 4px 14px rgba(145,71,255,.3);
+
+            }
+
+
+            .tp9s-backup-primary:hover {
+
+                filter: brightness(1.1);
+
+            }
+
+
+            .tp9s-quarantine-badge {
+
+                font-size: 11px;
+
+                opacity: .85;
+
+                cursor: help;
+
+            }
+
+
             .tp9s-msg-count {
 
                 border: 0;
@@ -7045,6 +10984,200 @@ dashboardButton.style.visibility =
             }
 
 
+            /* =====================================================
+               HABITUDES — heatmap 7 jours x 24 heures
+            ===================================================== */
+
+            .tp9s-heat-grid {
+
+                display: grid;
+
+                grid-template-columns: 74px repeat(24, minmax(0, 1fr)) 58px;
+
+                gap: 3px;
+
+                align-items: center;
+
+            }
+
+
+            .tp9s-heat-day {
+
+                font-size: 11px;
+
+                color: #999;
+
+                white-space: nowrap;
+
+            }
+
+
+            .tp9s-heat-hour {
+
+                font-size: 9px;
+
+                color: #666;
+
+                text-align: center;
+
+            }
+
+
+            .tp9s-heat-cell {
+
+                position: relative;
+
+                aspect-ratio: 1 / 1;
+
+                border-radius: 3px;
+
+                background: rgba(255,255,255,.04);
+
+                transition: transform .1s ease, box-shadow .1s ease;
+
+            }
+
+
+            .tp9s-heat-cell:hover {
+
+                transform: scale(1.4);
+
+                box-shadow: 0 0 0 1px rgba(255,255,255,.45);
+
+                z-index: 1;
+
+            }
+
+
+            .tp9s-heat-l1 { background: rgba(145,71,255,.3); }
+            .tp9s-heat-l2 { background: rgba(145,71,255,.52); }
+            .tp9s-heat-l3 { background: rgba(145,71,255,.76); }
+            .tp9s-heat-l4 { background: #a970ff; }
+
+
+            .tp9s-heat-total {
+
+                font-size: 10.5px;
+
+                color: #888;
+
+                text-align: right;
+
+                white-space: nowrap;
+
+            }
+
+
+            .tp9s-heat-legend {
+
+                display: flex;
+
+                align-items: center;
+
+                justify-content: flex-end;
+
+                gap: 5px;
+
+                margin-top: 12px;
+
+                font-size: 10.5px;
+
+                color: #777;
+
+            }
+
+
+            .tp9s-heat-legend .tp9s-heat-cell {
+
+                display: inline-block;
+
+                width: 11px;
+
+                height: 11px;
+
+                aspect-ratio: auto;
+
+            }
+
+
+            .tp9s-heat-legend .tp9s-heat-cell:hover {
+
+                transform: none;
+
+                box-shadow: none;
+
+            }
+
+
+            .tp9s-bar-row {
+
+                display: grid;
+
+                grid-template-columns: 96px 1fr 76px;
+
+                gap: 12px;
+
+                align-items: center;
+
+                padding: 7px 0;
+
+                font-size: 12px;
+
+                color: #ccc;
+
+            }
+
+
+            .tp9s-bar-track {
+
+                height: 8px;
+
+                border-radius: 5px;
+
+                background: rgba(255,255,255,.06);
+
+                overflow: hidden;
+
+            }
+
+
+            .tp9s-bar-fill {
+
+                height: 100%;
+
+                border-radius: 5px;
+
+                background: linear-gradient(90deg, #bf94ff, #9147ff);
+
+                transition: width .5s ease;
+
+            }
+
+
+            .tp9s-bar-value {
+
+                text-align: right;
+
+                color: #bbb;
+
+                font-weight: 600;
+
+            }
+
+
+            .tp9s-chart-controls {
+
+                display: flex;
+
+                align-items: center;
+
+                flex-wrap: wrap;
+
+                gap: 14px;
+
+            }
+
+
             .tp9s-chart-range {
 
                 display: flex;
@@ -7086,11 +11219,14 @@ dashboardButton.style.visibility =
 
             .tp9s-chart-range-active {
 
-                background: #9147ff;
+                background: var(--tp9-chart-color, #9147ff);
 
-                border-color: #9147ff;
+                border-color: var(--tp9-chart-color, #9147ff);
 
                 color: #fff;
+
+                box-shadow:
+                    0 2px 10px var(--tp9-chart-glow, rgba(145,71,255,.45));
 
             }
 
@@ -7144,7 +11280,8 @@ dashboardButton.style.visibility =
 
                 stroke-linejoin: round;
 
-                filter: drop-shadow(0 2px 6px rgba(145,71,255,.45));
+                filter:
+                    drop-shadow(0 2px 6px var(--tp9-chart-glow, rgba(145,71,255,.45)));
 
             }
 
@@ -7156,6 +11293,33 @@ dashboardButton.style.visibility =
                 font-size: 9.5px;
 
                 font-family: "Inter", Arial, sans-serif;
+
+            }
+
+
+            .tp9s-chart-axis-label-y {
+
+                fill: #6b6b6b;
+
+            }
+
+
+            .tp9s-chart-grid-line {
+
+                stroke: rgba(255,255,255,.07);
+
+                stroke-width: 1px;
+
+                stroke-dasharray: 3 5;
+
+            }
+
+
+            .tp9s-chart-grid-base {
+
+                stroke: rgba(255,255,255,.12);
+
+                stroke-dasharray: none;
 
             }
 
@@ -7193,11 +11357,12 @@ dashboardButton.style.visibility =
 
                 fill: #fff;
 
-                stroke: #9147ff;
+                stroke: var(--tp9-chart-color, #9147ff);
 
                 stroke-width: 2.5px;
 
-                filter: drop-shadow(0 0 4px rgba(145,71,255,.8));
+                filter:
+                    drop-shadow(0 0 4px var(--tp9-chart-glow-strong, rgba(145,71,255,.8)));
 
             }
 
@@ -7253,6 +11418,1107 @@ dashboardButton.style.visibility =
 
             }
 
+
+            /* =====================================================
+               MICRO-INTERACTIONS
+               -----------------------------------------------------
+               Un seul jeu de variables pour tous les mouvements :
+               il suffit de les neutraliser une fois pour respecter
+               "réduire les animations" du système. Rien d'autre que
+               transform / opacity / box-shadow, donc composé par le
+               GPU et sans recalcul de mise en page — ça compte, le
+               dashboard se reconstruit plusieurs fois par minute.
+            ===================================================== */
+
+            :root {
+
+                --tp9-lift: translateY(-1px);
+                --tp9-press: scale(.97);
+                --tp9-press-wide: scale(.99);
+                --tp9-pop: scale(1.08);
+                --tp9-press-pop: scale(.9);
+                --tp9-slide: translateX(2px);
+
+            }
+
+
+            .tp9s-nav-item:hover {
+
+                transform: var(--tp9-slide);
+
+            }
+
+
+            /* Toujours APRÈS le :hover : il reste actif pendant le
+               clic et gagnerait sinon la cascade. */
+
+            .tp9s-nav-item:active {
+
+                transform: var(--tp9-press-wide);
+
+            }
+
+
+            .tp9s-close-btn {
+
+                transition:
+                    background-color .12s ease,
+                    color .12s ease,
+                    transform .12s ease;
+
+            }
+
+
+            .tp9s-close-btn:hover {
+
+                transform: var(--tp9-lift);
+
+            }
+
+
+            .tp9s-close-btn:active {
+
+                transform: var(--tp9-press-wide);
+
+            }
+
+
+            .tp9s-topbar-actions button:hover {
+
+                transform: var(--tp9-pop);
+
+            }
+
+
+            .tp9s-topbar-actions button:active {
+
+                transform: var(--tp9-press-pop);
+
+            }
+
+
+            .tp9s-panel-link {
+
+                transition:
+                    background-color .12s ease,
+                    transform .12s ease;
+
+            }
+
+
+            .tp9s-panel-link:hover {
+
+                transform: var(--tp9-lift);
+
+            }
+
+
+            .tp9s-panel-link:active {
+
+                transform: var(--tp9-press);
+
+            }
+
+
+            .tp9s-chart-range-btn {
+
+                transition:
+                    background-color .12s ease,
+                    border-color .12s ease,
+                    color .12s ease,
+                    box-shadow .12s ease,
+                    transform .12s ease;
+
+            }
+
+
+            .tp9s-chart-range-btn:hover {
+
+                transform: var(--tp9-lift);
+
+            }
+
+
+            .tp9s-chart-range-btn:active {
+
+                transform: var(--tp9-press);
+
+            }
+
+
+            /* .tp9s-chart-range-btn:hover (0,2,0) l emporte sur
+               .tp9s-chart-range-active (0,1,0) : sans cette regle,
+               survoler le bouton actif lui ferait perdre la couleur
+               de la courbe au profit du gris de survol. */
+
+            .tp9s-chart-range-active:hover {
+
+                background: var(--tp9-chart-color, #9147ff);
+
+                filter: brightness(1.12);
+
+            }
+
+
+            .tp9s-backup-btn:hover {
+
+                transform: var(--tp9-lift);
+
+                box-shadow: 0 3px 10px rgba(0,0,0,.3);
+
+            }
+
+
+            .tp9s-backup-primary:hover {
+
+                box-shadow: 0 6px 18px rgba(145,71,255,.45);
+
+            }
+
+
+            .tp9s-backup-btn:active {
+
+                transform: var(--tp9-press);
+
+                box-shadow: none;
+
+            }
+
+
+            .tp9s-clear-logs {
+
+                transition:
+                    background-color .12s ease,
+                    transform .12s ease;
+
+            }
+
+
+            .tp9s-clear-logs:hover {
+
+                transform: var(--tp9-lift);
+
+            }
+
+
+            .tp9s-clear-logs:active {
+
+                transform: var(--tp9-press);
+
+            }
+
+
+            .tp9s-msg-count {
+
+                transition:
+                    background-color .12s ease,
+                    transform .12s ease;
+
+            }
+
+
+            .tp9s-msg-count:hover {
+
+                transform: var(--tp9-lift);
+
+            }
+
+
+            .tp9s-msg-count:active {
+
+                transform: var(--tp9-press);
+
+            }
+
+
+            .tp9s-streamer-delete:hover {
+
+                transform: var(--tp9-pop);
+
+            }
+
+
+            .tp9s-streamer-delete:active {
+
+                transform: var(--tp9-press-pop);
+
+            }
+
+
+            .tp9s-table-row {
+
+                transition:
+                    background-color .12s ease,
+                    transform .12s ease;
+
+            }
+
+
+            .tp9s-table-row:not(.tp9s-table-head):hover {
+
+                transform: var(--tp9-slide);
+
+            }
+
+
+            .tp9s-sortable:active {
+
+                transform: var(--tp9-press-wide);
+
+            }
+
+
+            .tp9s-card-clickable:active {
+
+                transform: var(--tp9-lift);
+
+            }
+
+
+            .tp9-chat-modal-close {
+
+                transition: color .12s ease, transform .12s ease;
+
+            }
+
+
+            .tp9-chat-modal-close:hover {
+
+                transform: var(--tp9-pop);
+
+            }
+
+
+            .tp9-chat-modal-close:active {
+
+                transform: var(--tp9-press-pop);
+
+            }
+
+
+            @media (prefers-reduced-motion: reduce) {
+
+                :root {
+
+                    --tp9-lift: none;
+                    --tp9-press: none;
+                    --tp9-press-wide: none;
+                    --tp9-pop: none;
+                    --tp9-press-pop: none;
+                    --tp9-slide: none;
+
+                }
+
+                /* Mouvements antérieurs aux variables. */
+
+                .tp9s-card:hover,
+                .tp9s-heat-cell:hover {
+
+                    transform: none;
+
+                }
+
+            }
+
+            /* =====================================================
+               REDESIGN — profondeur et dégradés
+               -----------------------------------------------------
+               Même principe que côté menu : bloc écrit en dernier,
+               effets portés par la couleur autant que par le
+               mouvement.
+            ===================================================== */
+
+            :root {
+
+                --tp9-lift: translateY(-2px);
+                --tp9-press: scale(.96);
+
+            }
+
+
+            /* Le gris #0a0a0c était parfaitement plat. Trois halos
+               très diffus posés sur un dégradé sombre suffisent à
+               donner de la profondeur — et comme cartes et panneaux
+               sont translucides, c'est ce fond qu'on aperçoit à
+               travers eux.
+
+               Volontairement AUCUN backdrop-filter sur les cartes :
+               derrière elles il n'y a qu'un dégradé lisse, un flou
+               n'y changerait rien de visible alors qu'il coûte cher
+               à repeindre — or le contenu de cet onglet est
+               entièrement reconstruit à chaque resynchro entre
+               onglets. Le flou est réservé à la barre latérale et à
+               la barre du haut, qui elles ne bougent jamais. */
+
+            #tp9-stats {
+
+                background:
+                    radial-gradient(1100px 620px at 6% -14%,
+                        rgba(145,71,255,.2), transparent 60%),
+                    radial-gradient(900px 520px at 104% 2%,
+                        rgba(31,156,240,.12), transparent 58%),
+                    radial-gradient(760px 520px at 52% 118%,
+                        rgba(145,71,255,.1), transparent 60%),
+                    linear-gradient(175deg, #101018, #0a0a0c 55%, #08080a);
+
+            }
+
+
+            .tp9s-main {
+
+                background: transparent;
+
+            }
+
+
+            .tp9s-sidebar {
+
+                background:
+                    linear-gradient(180deg,
+                        rgba(16,16,22,.8),
+                        rgba(10,10,12,.62));
+
+                backdrop-filter: blur(12px);
+
+                border-right-color: rgba(255,255,255,.06);
+
+            }
+
+
+            .tp9s-topbar {
+
+                background:
+                    linear-gradient(180deg,
+                        rgba(145,71,255,.1),
+                        rgba(10,10,12,.2));
+
+                backdrop-filter: blur(8px);
+
+            }
+
+
+            .tp9s-brand-icon {
+
+                box-shadow: 0 4px 14px rgba(145,71,255,.4);
+
+            }
+
+
+            .tp9s-card {
+
+                background:
+                    linear-gradient(160deg,
+                        rgba(255,255,255,.065),
+                        rgba(255,255,255,.012));
+
+                border-color: rgba(255,255,255,.08);
+
+            }
+
+
+            .tp9s-card::before {
+
+                background:
+                    linear-gradient(90deg,
+                        var(--accent),
+                        color-mix(in srgb, var(--accent) 8%, transparent));
+
+            }
+
+
+            .tp9s-card:hover {
+
+                border-color:
+                    color-mix(in srgb, var(--accent) 42%, transparent);
+
+                box-shadow:
+                    0 12px 28px rgba(0,0,0,.42),
+                    0 0 20px -6px color-mix(in srgb, var(--accent) 45%, transparent);
+
+            }
+
+
+            .tp9s-panel {
+
+                background:
+                    linear-gradient(160deg,
+                        rgba(255,255,255,.042),
+                        rgba(255,255,255,.008));
+
+                border-color: rgba(255,255,255,.07);
+
+                transition: border-color .15s ease;
+
+            }
+
+
+            .tp9s-panel:hover {
+
+                border-color: rgba(255,255,255,.1);
+
+            }
+
+
+            .tp9s-nav-item:hover {
+
+                background:
+                    linear-gradient(90deg,
+                        rgba(255,255,255,.1),
+                        rgba(255,255,255,.02));
+
+            }
+
+
+            .tp9s-nav-active {
+
+                background:
+                    linear-gradient(90deg,
+                        rgba(145,71,255,.3),
+                        rgba(145,71,255,.05)) !important;
+
+                box-shadow: inset 0 0 0 1px rgba(145,71,255,.16);
+
+            }
+
+
+            .tp9s-topbar-actions button {
+
+                background:
+                    linear-gradient(135deg,
+                        rgba(255,255,255,.09),
+                        rgba(255,255,255,.03));
+
+            }
+
+
+            .tp9s-topbar-actions button:hover {
+
+                background:
+                    linear-gradient(135deg,
+                        rgba(255,255,255,.18),
+                        rgba(255,255,255,.06));
+
+                transform: var(--tp9-pop);
+
+            }
+
+
+            /* PAS de translation ici : le conteneur .tp9s-table a
+               overflow-x: auto, et une ligne décalée de 2 px dépasse
+               sa largeur — ça faisait apparaître une barre de
+               défilement horizontale sous le tableau à chaque survol.
+               Le dégradé marque déjà la ligne. */
+
+            .tp9s-table-row:not(.tp9s-table-head):hover {
+
+                background:
+                    linear-gradient(90deg,
+                        rgba(145,71,255,.13),
+                        rgba(255,255,255,.02) 55%);
+
+                transform: none;
+
+            }
+
+
+            .tp9s-lead-row {
+
+                border-radius: 8px;
+
+                transition: background-color .12s ease;
+
+            }
+
+
+            .tp9s-lead-row:hover {
+
+                background:
+                    linear-gradient(90deg,
+                        rgba(145,71,255,.12),
+                        rgba(255,255,255,.02) 55%);
+
+            }
+
+
+            .tp9s-backup-primary {
+
+                background:
+                    linear-gradient(120deg, #a970ff, #772ce8 55%, #5b21b6) !important;
+
+                background-size: 200% 100% !important;
+
+                background-position: 0 0 !important;
+
+                transition:
+                    background-position .35s ease,
+                    box-shadow .15s ease,
+                    transform .12s ease !important;
+
+            }
+
+
+            .tp9s-backup-primary:hover {
+
+                filter: none;
+
+                background-position: 100% 0 !important;
+
+                transform: var(--tp9-lift);
+
+                box-shadow: 0 8px 22px rgba(145,71,255,.45);
+
+            }
+
+
+            .tp9s-backup-btn:hover {
+
+                background:
+                    linear-gradient(135deg,
+                        rgba(255,255,255,.16),
+                        rgba(255,255,255,.05));
+
+            }
+
+
+            .tp9s-chart-range-btn:hover {
+
+                background:
+                    linear-gradient(135deg,
+                        rgba(255,255,255,.14),
+                        rgba(255,255,255,.04));
+
+            }
+
+
+            /* Même raison qu'ailleurs : .tp9s-chart-range-btn:hover
+               (0,2,0) l'emporterait sur .tp9s-chart-range-active
+               (0,1,0), et survoler le bouton actif lui ferait perdre
+               la couleur de la mesure en cours. */
+
+            .tp9s-chart-range-active:hover {
+
+                background: var(--tp9-chart-color, #9147ff);
+
+                filter: brightness(1.12);
+
+            }
+
+
+            /* =====================================================
+               ÉTATS ENFONCÉS — voir la note côté menu : toujours
+               après les :hover de ce bloc.
+            ===================================================== */
+
+            .tp9s-nav-item:active {
+
+                transform: var(--tp9-press-wide);
+
+            }
+
+
+            .tp9s-topbar-actions button:active {
+
+                transform: var(--tp9-press-pop);
+
+            }
+
+
+            .tp9s-backup-btn:active,
+            .tp9s-backup-primary:active,
+            .tp9s-chart-range-btn:active {
+
+                transform: var(--tp9-press);
+
+                box-shadow: none;
+
+            }
+
+
+            @media (prefers-reduced-motion: reduce) {
+
+                :root {
+
+                    --tp9-lift: none;
+                    --tp9-press: none;
+
+                }
+
+            }
+
+            /* =====================================================
+               RETOURS D'USAGE — barres par jour, modale tchat
+            ===================================================== */
+
+            .tp9s-bar-label {
+
+                display: flex;
+
+                align-items: center;
+
+                gap: 8px;
+
+            }
+
+
+            .tp9s-bar-dot {
+
+                flex: 0 0 auto;
+
+                width: 8px;
+                height: 8px;
+
+                border-radius: 50%;
+
+            }
+
+
+            .tp9s-bar-track {
+
+                background: rgba(255,255,255,.07);
+
+                box-shadow: inset 0 0 0 1px rgba(255,255,255,.04);
+
+            }
+
+
+            /* --bar est posé sur la barre elle-même (voir
+               renderStatsHabitudes) : le dégradé part d'une version
+               éclaircie de la couleur du jour et y revient, ce qui
+               garde du relief sans inventer une seconde teinte. */
+
+            .tp9s-bar-fill {
+
+                background:
+                    linear-gradient(90deg,
+                        color-mix(in srgb, var(--bar, #9147ff) 55%, #fff),
+                        var(--bar, #9147ff));
+
+            }
+
+
+            /* =====================================================
+               MODALE — HISTORIQUE DES MESSAGES
+            ===================================================== */
+
+            .tp9-chat-modal-backdrop {
+
+                background: rgba(0,0,0,.66);
+
+                backdrop-filter: blur(3px);
+
+            }
+
+
+            .tp9-chat-modal-box {
+
+                width: min(560px, 92vw);
+
+                max-height: 76vh;
+
+                border-radius: 16px;
+
+                border-color: rgba(255,255,255,.12);
+
+                background:
+                    radial-gradient(600px 300px at 0% 0%,
+                        rgba(145,71,255,.14), transparent 60%),
+                    linear-gradient(180deg, #14141a, #0c0c10);
+
+                box-shadow: 0 24px 70px rgba(0,0,0,.65);
+
+                animation: tp9-chat-in .18s ease-out;
+
+            }
+
+
+            @keyframes tp9-chat-in {
+
+                from {
+                    opacity: 0;
+                    transform: translateY(8px) scale(.985);
+                }
+
+                to {
+                    opacity: 1;
+                    transform: none;
+                }
+
+            }
+
+
+            .tp9-chat-modal-header {
+
+                padding: 14px 16px;
+
+                border-bottom: 1px solid rgba(255,255,255,.07);
+
+                background: linear-gradient(180deg,
+                    rgba(145,71,255,.1), transparent);
+
+            }
+
+
+            .tp9-chat-modal-who {
+
+                display: flex;
+
+                align-items: center;
+
+                gap: 11px;
+
+                min-width: 0;
+
+            }
+
+
+            .tp9-chat-modal-avatar {
+
+                flex: 0 0 auto;
+
+                width: 36px;
+                height: 36px;
+
+                border-radius: 50%;
+
+                overflow: hidden;
+
+                display: flex;
+
+                align-items: center;
+
+                justify-content: center;
+
+                font-size: 14px;
+
+                font-weight: 800;
+
+                color: #fff;
+
+                background: linear-gradient(135deg, #9147ff, #4c1d95);
+
+            }
+
+
+            .tp9-chat-modal-avatar img {
+
+                width: 100%;
+                height: 100%;
+
+                object-fit: cover;
+
+            }
+
+
+            .tp9-chat-modal-ident {
+
+                min-width: 0;
+
+            }
+
+
+            .tp9-chat-modal-title {
+
+                font-size: 14.5px;
+
+                font-weight: 800;
+
+                white-space: nowrap;
+
+                overflow: hidden;
+
+                text-overflow: ellipsis;
+
+            }
+
+
+            .tp9-chat-modal-sub {
+
+                margin-top: 1px;
+
+                font-size: 11px;
+
+                font-weight: 600;
+
+                color: #9d8ac2;
+
+            }
+
+
+            .tp9-chat-modal-list {
+
+                flex: 1 1 auto;
+
+                max-height: none;
+
+                padding: 6px 14px 14px;
+
+                scrollbar-width: thin;
+
+                scrollbar-color: rgba(255,255,255,.18) transparent;
+
+            }
+
+
+            .tp9-chat-modal-list::-webkit-scrollbar {
+
+                width: 8px;
+
+            }
+
+
+            .tp9-chat-modal-list::-webkit-scrollbar-thumb {
+
+                border-radius: 8px;
+
+                background: rgba(255,255,255,.14);
+
+            }
+
+
+            /* ---- séparateur de journée ---- */
+
+            .tp9-chat-day {
+
+                display: flex;
+
+                align-items: center;
+
+                gap: 10px;
+
+                margin: 14px 0 9px;
+
+                font-size: 10px;
+
+                font-weight: 700;
+
+                letter-spacing: .6px;
+
+                text-transform: uppercase;
+
+                color: #7e7e8a;
+
+            }
+
+
+            .tp9-chat-day::before,
+            .tp9-chat-day::after {
+
+                content: '';
+
+                flex: 1 1 auto;
+
+                height: 1px;
+
+                background: rgba(255,255,255,.07);
+
+            }
+
+
+            .tp9-chat-day:first-child {
+
+                margin-top: 4px;
+
+            }
+
+
+            /* ---- une ligne = heure + bulle ---- */
+
+            .tp9-chat-row {
+
+                display: flex;
+
+                align-items: flex-start;
+
+                gap: 10px;
+
+                padding: 3px 0;
+
+            }
+
+
+            .tp9-chat-time {
+
+                flex: 0 0 auto;
+
+                width: 36px;
+
+                padding-top: 7px;
+
+                color: #6f6f7a;
+
+                font-size: 10.5px;
+
+                font-variant-numeric: tabular-nums;
+
+                text-align: right;
+
+            }
+
+
+            .tp9-chat-bubble {
+
+                position: relative;
+
+                max-width: 100%;
+
+                padding: 7px 12px;
+
+                border-radius: 12px 12px 12px 4px;
+
+                background:
+                    linear-gradient(135deg,
+                        rgba(145,71,255,.24),
+                        rgba(145,71,255,.1));
+
+                border: 1px solid rgba(145,71,255,.22);
+
+                color: #eee;
+
+                font-size: 12.5px;
+
+                line-height: 1.45;
+
+                word-break: break-word;
+
+                transition: border-color .12s ease;
+
+            }
+
+
+            .tp9-chat-row:hover .tp9-chat-bubble {
+
+                border-color: rgba(145,71,255,.45);
+
+            }
+
+
+            .tp9-chat-row:hover .tp9-chat-time {
+
+                color: #b9b9c4;
+
+            }
+
+            /* =====================================================
+               HALO QUI SUIT LE CURSEUR
+               -----------------------------------------------------
+               Même mécanique que côté menu (voir le commentaire de
+               la feuille du popup) : --mx / --my viennent de
+               attachSpotlight(), le reste est un simple dégradé.
+            ===================================================== */
+
+            .tp9s-nav-item,
+            .tp9s-close-btn,
+            .tp9s-topbar-actions button,
+            .tp9s-panel-link,
+            .tp9s-chart-range-btn,
+            .tp9s-backup-btn,
+            .tp9s-clear-logs,
+            .tp9s-msg-count,
+            .tp9s-streamer-delete,
+            .tp9-chat-modal-close {
+
+                position: relative;
+
+            }
+
+
+            .tp9s-nav-item::after,
+            .tp9s-close-btn::after,
+            .tp9s-topbar-actions button::after,
+            .tp9s-panel-link::after,
+            .tp9s-chart-range-btn::after,
+            .tp9s-backup-btn::after,
+            .tp9s-clear-logs::after,
+            .tp9s-msg-count::after,
+            .tp9s-streamer-delete::after,
+            .tp9-chat-modal-close::after {
+
+                content: '';
+
+                position: absolute;
+
+                inset: 0;
+
+                border-radius: inherit;
+
+                pointer-events: none;
+
+                opacity: 0;
+
+                background:
+                    radial-gradient(
+                        circle var(--tp9-spot, 110px)
+                            at var(--mx, 50%) var(--my, 50%),
+                        rgba(255,255,255,.2),
+                        rgba(255,255,255,0) 72%);
+
+                transition: opacity .15s ease;
+
+            }
+
+
+            .tp9s-nav-item:hover::after,
+            .tp9s-close-btn:hover::after,
+            .tp9s-topbar-actions button:hover::after,
+            .tp9s-panel-link:hover::after,
+            .tp9s-chart-range-btn:hover::after,
+            .tp9s-backup-btn:hover::after,
+            .tp9s-clear-logs:hover::after,
+            .tp9s-msg-count:hover::after,
+            .tp9s-streamer-delete:hover::after,
+            .tp9-chat-modal-close:hover::after {
+
+                opacity: 1;
+
+            }
+
+
+            /* Petits boutons : halo resserré, sinon il couvre tout. */
+
+            .tp9s-topbar-actions button,
+            .tp9s-streamer-delete,
+            .tp9-chat-modal-close {
+
+                --tp9-spot: 30px;
+
+            }
+
+
+            .tp9s-msg-count,
+            .tp9s-panel-link,
+            .tp9s-chart-range-btn {
+
+                --tp9-spot: 55px;
+
+            }
+
+
+            /* La nav est large mais peu haute : un halo trop grand y
+               ressemblerait à un simple fond clair. */
+
+            .tp9s-nav-item {
+
+                --tp9-spot: 70px;
+
+            }
+
+
+            /* Sur les boutons déjà colorés (mesure/période actifs,
+               bouton de sauvegarde principal), le blanc franc
+               délaverait la couleur : on l'adoucit. */
+
+            .tp9s-chart-range-active::after,
+            .tp9s-backup-primary::after {
+
+                background:
+                    radial-gradient(
+                        circle var(--tp9-spot, 110px)
+                            at var(--mx, 50%) var(--my, 50%),
+                        rgba(255,255,255,.28),
+                        rgba(255,255,255,0) 70%);
+
+            }
+
         `;
 
         document.head.appendChild(style);
@@ -7272,6 +12538,8 @@ dashboardButton.style.visibility =
         { id: 'overview', label: 'Vue d’ensemble', icon: '📊', group: 'GÉNÉRAL' },
         { id: 'relais', label: 'Relais', icon: '📡', group: 'GÉNÉRAL' },
         { id: 'streamers', label: 'Streamers', icon: '🎥', group: 'GÉNÉRAL' },
+        { id: 'habitudes', label: 'Habitudes', icon: '🕒', group: 'GÉNÉRAL' },
+        { id: 'sauvegarde', label: 'Sauvegarde', icon: '💾', group: 'SYSTÈME' },
         { id: 'logs', label: 'Logs', icon: '📄', group: 'SYSTÈME' }
     ];
 
@@ -7342,9 +12610,9 @@ dashboardButton.style.visibility =
                         <div class="tp9s-page-sub"></div>
                     </div>
                     <div class="tp9s-topbar-actions">
-                        <button type="button" class="tp9s-refresh" title="Rafraîchir les stats">🔄</button>
-                        <button type="button" class="tp9s-reset-stats" title="Réinitialiser les stats">🗑</button>
-                        <button type="button" class="tp9s-close" title="Fermer">×</button>
+                        <button type="button" class="tp9s-refresh" data-tp9-tip="Rafraîchir les stats" data-tp9-tip-sub="Relit les statistiques enregistrées par les autres onglets.">🔄</button>
+                        <button type="button" class="tp9s-reset-stats" data-tp9-tip="Réinitialiser les stats" data-tp9-tip-sub="Efface tout : usage des proxys, tchat, bande passante, logs.">${trashIconSVG(15)}</button>
+                        <button type="button" class="tp9s-close" data-tp9-tip="Fermer le dashboard">×</button>
                     </div>
                 </div>
 
@@ -7357,6 +12625,10 @@ dashboardButton.style.visibility =
         document.body.appendChild(statsDashboard);
 
         injectStatsCSS();
+
+        attachTooltips(statsDashboard);
+
+        attachSpotlight(statsDashboard);
 
         statsDashboard.querySelectorAll('.tp9s-nav-item').forEach(function (btn) {
 
@@ -7386,51 +12658,41 @@ dashboardButton.style.visibility =
         // conteneur persistant plutôt que sur chaque élément.
         statsDashboard.addEventListener('click', function (event) {
 
-            var rangeBtn = event.target.closest('.tp9s-chart-range-btn');
+            var chartBtn = event.target.closest(
+                '.tp9s-chart-range-btn, .tp9s-chart-metric-btn'
+            );
 
-            if (rangeBtn) {
+            if (chartBtn) {
 
-                var newRange = rangeBtn.getAttribute('data-range');
+                var newMetric = chartBtn.getAttribute('data-metric');
+                var newRange = chartBtn.getAttribute('data-range');
 
-                if (newRange === statsWatchChartRange) {
-                    return;
-                }
+                // Un bouton de mesure porte les deux classes mais
+                // n'a pas de data-range : on teste donc la mesure
+                // en premier.
+                if (newMetric) {
 
-                statsWatchChartRange = newRange;
-
-                // Ne redessine QUE le graphique (pas tout l'onglet
-                // Vue d'ensemble) : sinon le scroll saute et les
-                // autres cartes se ré-animent à chaque changement
-                // de période.
-                var panel = rangeBtn.closest('.tp9s-panel');
-
-                if (panel) {
-
-                    panel.querySelectorAll('.tp9s-chart-range-btn').forEach(function (btn) {
-
-                        btn.classList.toggle(
-                            'tp9s-chart-range-active',
-                            btn === rangeBtn
-                        );
-
-                    });
-
-                    renderWatchTimeChartSVG(panel.querySelector('.tp9s-chart-canvas'));
-
-                    var subEl = panel.querySelector('.tp9s-panel-sub');
-
-                    if (subEl) {
-
-                        var newTotal = getWatchTimeBuckets(statsWatchChartRange).reduce(
-                            function (acc, b) { return acc + b.ms; },
-                            0
-                        );
-
-                        subEl.textContent = formatDuration(newTotal) + ' cumulées sur la période';
-
+                    if (newMetric === statsChartMetric) {
+                        return;
                     }
 
+                    statsChartMetric = newMetric;
+
+                } else if (newRange) {
+
+                    if (newRange === statsWatchChartRange) {
+                        return;
+                    }
+
+                    statsWatchChartRange = newRange;
+
+                } else {
+
+                    return;
+
                 }
+
+                refreshChartPanel(chartBtn.closest('.tp9s-panel'));
 
                 return;
 
@@ -7460,6 +12722,24 @@ dashboardButton.style.visibility =
             if (msgBtn) {
 
                 showChatHistoryModal(msgBtn.getAttribute('data-channel'));
+
+                return;
+
+            }
+
+            var deleteBtn = event.target.closest('.tp9s-streamer-delete');
+
+            if (deleteBtn) {
+
+                deleteStreamerStats(deleteBtn.getAttribute('data-channel'));
+
+                return;
+
+            }
+
+            if (event.target.closest('.tp9s-streamers-clean')) {
+
+                cleanPhantomStreamers();
 
                 return;
 
@@ -7502,20 +12782,33 @@ dashboardButton.style.visibility =
     }
 
     var STATS_DASHBOARD_PARAM = 'tp9_dashboard';
+    var STATS_TAB_PARAM = 'tp9_tab';
 
     var isDashboardOnlyTab = false;
 
     try {
 
+        var dashboardParams = new URLSearchParams(location.search);
+
         isDashboardOnlyTab =
-            new URLSearchParams(location.search).get(STATS_DASHBOARD_PARAM) === '1';
+            dashboardParams.get(STATS_DASHBOARD_PARAM) === '1';
+
+        var requestedTab = dashboardParams.get(STATS_TAB_PARAM);
+
+        var tabExists = STATS_TABS.some(function (tab) {
+            return tab.id === requestedTab;
+        });
+
+        if (tabExists) {
+            statsActiveTab = requestedTab;
+        }
 
     } catch (e) {}
 
     // Ouvre le dashboard dans un NOUVEL onglet Twitch (même origine
     // donc même localStorage) plutôt qu'en overlay par-dessus le
     // lecteur en cours — évite de masquer le stream.
-    function openStatsDashboardInNewTab() {
+    function openStatsDashboardInNewTab(initialTab) {
 
         try {
 
@@ -7527,7 +12820,10 @@ dashboardButton.style.visibility =
                 location.origin +
                 '/tp9proxydashboard?' +
                 STATS_DASHBOARD_PARAM +
-                '=1';
+                '=1' +
+                (initialTab
+                    ? '&' + STATS_TAB_PARAM + '=' + encodeURIComponent(initialTab)
+                    : '');
 
             window.open(url, '_blank', 'noopener');
 
@@ -7713,14 +13009,16 @@ dashboardButton.style.visibility =
 
         if (btn) {
 
-            var original = btn.textContent;
+            // innerHTML et pas textContent : le bouton contient une
+            // icône SVG, que textContent effacerait définitivement.
+            var original = btn.innerHTML;
 
-            btn.textContent = '✅';
+            btn.innerHTML = '✅';
 
             setTimeout(
                 function () {
 
-                    btn.textContent = original;
+                    btn.innerHTML = original;
 
                 },
                 800
@@ -7770,6 +13068,8 @@ dashboardButton.style.visibility =
         overview: { title: 'VUE D’ENSEMBLE', sub: 'État général de tes relais de flux' },
         relais: { title: 'RELAIS', sub: 'Classement et utilisation des proxys' },
         streamers: { title: 'STREAMERS', sub: 'Statistiques par chaîne regardée' },
+        habitudes: { title: 'HABITUDES', sub: 'Quand est-ce que tu regardes Twitch ?' },
+        sauvegarde: { title: 'SAUVEGARDE', sub: 'Mettre tes statistiques à l\'abri d\'un nettoyage de navigateur' },
         logs: { title: 'LOGS', sub: 'Journal des événements du script' }
     };
 
@@ -7806,6 +13106,10 @@ dashboardButton.style.visibility =
             renderStatsRelais(content);
         } else if (statsActiveTab === 'streamers') {
             renderStatsStreamers(content);
+        } else if (statsActiveTab === 'habitudes') {
+            renderStatsHabitudes(content);
+        } else if (statsActiveTab === 'sauvegarde') {
+            renderStatsBackup(content);
         } else if (statsActiveTab === 'logs') {
             renderStatsLogs(content);
         }
@@ -7816,6 +13120,10 @@ dashboardButton.style.visibility =
             // aucune animation, aucun saut de scroll, pour rester
             // invisible pour l'utilisateur.
             content.scrollTop = scrollTop;
+
+            // L'élément survolé vient d'être détruit et recréé :
+            // on raccroche la bulle à son remplaçant.
+            refreshTooltipAnchor();
 
             return;
 
@@ -7871,13 +13179,24 @@ dashboardButton.style.visibility =
 
     var statsWatchChartRange = '24h';
 
+    // 'watch' (temps de visionnage) ou 'bandwidth' (octets) :
+    // voir STATS_CHART_METRICS.
+    var statsChartMetric = 'watch';
+
     // range '24h' = fenêtre glissante des dernières 24 heures, un
     // point par heure (voir hourlyWatchTime / hourKeyFor). range
     // '365' regroupe par mois (12 barres), sinon un point par jour
     // (7 ou 30 barres) — sur 1 an, une barre par jour serait
     // illisible et de toute façon on ne conserve pas plus de 370
-    // jours d'historique (voir pruneDailyWatchTime).
-    function getWatchTimeBuckets(range) {
+    // jours d'historique (voir pruneDailyMap).
+    function getChartBuckets(range, metricId) {
+
+        var metric =
+            STATS_CHART_METRICS[metricId] ||
+            STATS_CHART_METRICS.watch;
+
+        var hourlyMap = pageStats[metric.hourly] || {};
+        var dailyMap = pageStats[metric.daily] || {};
 
         var now = new Date();
 
@@ -7891,7 +13210,7 @@ dashboardButton.style.visibility =
 
                 hourBuckets.push({
                     label: pad2(hourDate.getHours()) + 'h',
-                    ms: pageStats.hourlyWatchTime[hourKeyFor(hourDate)] || 0
+                    ms: hourlyMap[hourKeyFor(hourDate)] || 0
                 });
 
             }
@@ -7912,10 +13231,10 @@ dashboardButton.style.visibility =
 
                 var sum = 0;
 
-                Object.keys(pageStats.dailyWatchTime).forEach(function (key) {
+                Object.keys(dailyMap).forEach(function (key) {
 
                     if (key.indexOf(monthPrefix) === 0) {
-                        sum += pageStats.dailyWatchTime[key];
+                        sum += dailyMap[key];
                     }
 
                 });
@@ -7951,7 +13270,7 @@ dashboardButton.style.visibility =
 
             dayBuckets.push({
                 label: dayLabel,
-                ms: pageStats.dailyWatchTime[dateKeyFor(day)] || 0
+                ms: dailyMap[dateKeyFor(day)] || 0
             });
 
         }
@@ -7962,7 +13281,9 @@ dashboardButton.style.visibility =
 
     function buildWatchTimeChartHTML() {
 
-        var buckets = getWatchTimeBuckets(statsWatchChartRange);
+        var metric = getChartMetric();
+
+        var buckets = getChartBuckets(statsWatchChartRange, statsChartMetric);
 
         var rangeButtons = STATS_WATCH_RANGES.map(function (r) {
 
@@ -7970,6 +13291,20 @@ dashboardButton.style.visibility =
                 '<button type="button" class="tp9s-chart-range-btn' +
                     (r.id === statsWatchChartRange ? ' tp9s-chart-range-active' : '') +
                     '" data-range="' + r.id + '">' + escapeHTML(r.label) + '</button>'
+            );
+
+        }).join('');
+
+        // Les boutons de mesure portent AUSSI la classe des boutons
+        // de période : même habillage, sans dupliquer le CSS.
+        var metricButtons = Object.keys(STATS_CHART_METRICS).map(function (id) {
+
+            return (
+                '<button type="button" class="tp9s-chart-range-btn tp9s-chart-metric-btn' +
+                    (id === statsChartMetric ? ' tp9s-chart-range-active' : '') +
+                    '" data-metric="' + id + '">' +
+                    escapeHTML(STATS_CHART_METRICS[id].button) +
+                '</button>'
             );
 
         }).join('');
@@ -7982,16 +13317,78 @@ dashboardButton.style.visibility =
             '<div class="tp9s-panel">' +
                 '<div class="tp9s-panel-title-row">' +
                     '<div>' +
-                        '<div class="tp9s-panel-title">Temps de visionnage</div>' +
+                        '<div class="tp9s-panel-title">' +
+                            escapeHTML(metric.title) +
+                        '</div>' +
                         '<div class="tp9s-panel-sub">' +
-                            escapeHTML(formatDuration(total)) + ' cumulées sur la période' +
+                            escapeHTML(metric.format(total) + ' ' + metric.suffix) +
                         '</div>' +
                     '</div>' +
-                    '<div class="tp9s-chart-range">' + rangeButtons + '</div>' +
+                    '<div class="tp9s-chart-controls">' +
+                        '<div class="tp9s-chart-range">' + metricButtons + '</div>' +
+                        '<div class="tp9s-chart-range">' + rangeButtons + '</div>' +
+                    '</div>' +
                 '</div>' +
                 '<div class="tp9s-chart-canvas"></div>' +
             '</div>'
         );
+
+    }
+
+
+    // Redessine le graphique d'un panneau DÉJÀ affiché, sans
+    // reconstruire tout l'onglet : sinon le scroll saute et les
+    // autres cartes se ré-animent à chaque clic sur une période ou
+    // une mesure.
+    function refreshChartPanel(panel) {
+
+        if (!panel) {
+            return;
+        }
+
+        var metric = getChartMetric();
+
+        // Les boutons de mesure sont aussi des .tp9s-chart-range-btn
+        // (voir plus haut) : cette première passe les désactive tous,
+        // la seconde rallume le bon.
+        panel.querySelectorAll('.tp9s-chart-range-btn').forEach(function (btn) {
+
+            btn.classList.toggle(
+                'tp9s-chart-range-active',
+                btn.getAttribute('data-range') === statsWatchChartRange
+            );
+
+        });
+
+        panel.querySelectorAll('.tp9s-chart-metric-btn').forEach(function (btn) {
+
+            btn.classList.toggle(
+                'tp9s-chart-range-active',
+                btn.getAttribute('data-metric') === statsChartMetric
+            );
+
+        });
+
+        var titleEl = panel.querySelector('.tp9s-panel-title');
+
+        if (titleEl) {
+            titleEl.textContent = metric.title;
+        }
+
+        var subEl = panel.querySelector('.tp9s-panel-sub');
+
+        if (subEl) {
+
+            var total = getChartBuckets(statsWatchChartRange, statsChartMetric)
+                .reduce(function (acc, b) {
+                    return acc + b.ms;
+                }, 0);
+
+            subEl.textContent = metric.format(total) + ' ' + metric.suffix;
+
+        }
+
+        renderWatchTimeChartSVG(panel.querySelector('.tp9s-chart-canvas'));
 
     }
 
@@ -8104,6 +13501,196 @@ dashboardButton.style.visibility =
     var CHART_PAD_X = 8;
     var CHART_PAD_TOP = 16;
 
+    // Marge gauche réservée aux graduations de l'axe vertical
+    // ("30 min", "2h", ...) : assez large pour le plus long libellé
+    // possible à 9.5px sans que le texte ne déborde du panneau.
+    var CHART_PAD_LEFT = 42;
+
+    // Paliers "ronds" candidats pour l'axe vertical : on retient le
+    // plus petit qui découpe le max de la période en ~4 graduations,
+    // pour ne jamais afficher de libellés du genre "47 min" ou
+    // "3h17" sur le côté.
+    var CHART_AXIS_STEPS_MS = [1, 2, 5, 10, 15, 30]
+        .map(function (min) {
+            return min * 60 * 1000;
+        })
+        .concat(
+            [1, 2, 3, 6, 12, 24, 48, 120, 240, 480, 1200, 2400, 4800]
+                .map(function (hours) {
+                    return hours * 60 * 60 * 1000;
+                })
+        );
+
+    var CHART_AXIS_TARGET_TICKS = 4;
+
+    // Libellé court pour l'axe : formatDuration() renverrait "1h00"
+    // là où "1h" suffit, et "0 min" là où un simple "0" est plus
+    // lisible au ras de la ligne de base.
+    function formatAxisDuration(ms) {
+
+        if (!ms) {
+            return '0';
+        }
+
+        if (ms < 60 * 60 * 1000) {
+            return Math.round(ms / 60000) + ' min';
+        }
+
+        var totalMinutes = Math.round(ms / 60000);
+
+        var hours = Math.floor(totalMinutes / 60);
+        var minutes = totalMinutes % 60;
+
+        if (!minutes) {
+            return hours + 'h';
+        }
+
+        return hours + 'h' + (minutes < 10 ? '0' : '') + minutes;
+
+    }
+
+    var MB_BYTES = 1024 * 1024;
+
+    // Mêmes paliers "ronds" que CHART_AXIS_STEPS_MS, mais en
+    // octets. La bascule Mo -> Go se fait à 1000 Mo, comme dans
+    // formatBytes().
+    var CHART_AXIS_STEPS_BYTES = [10, 25, 50, 100, 250, 500]
+        .map(function (mb) {
+            return mb * MB_BYTES;
+        })
+        .concat(
+            [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2000, 5000]
+                .map(function (gb) {
+                    return gb * 1000 * MB_BYTES;
+                })
+        );
+
+    // formatBytes() donnerait "1024.0 Mo" ou "2.00 Go" : trop long
+    // et trop précis pour une graduation d'axe.
+    function formatAxisBytes(bytes) {
+
+        if (!bytes) {
+            return '0';
+        }
+
+        var mb = bytes / MB_BYTES;
+
+        if (mb >= 1000) {
+
+            var gb = mb / 1000;
+
+            return (
+                (gb >= 10 ? Math.round(gb) : Math.round(gb * 10) / 10) +
+                ' Go'
+            );
+
+        }
+
+        return Math.round(mb) + ' Mo';
+
+    }
+
+    // Le graphique sert deux mesures : le temps de visionnage et la
+    // bande passante. Tout le reste — découpage en périodes, axe à
+    // paliers ronds, vague lissée, tooltip — est commun ; seules la
+    // source des données, la mise en forme et l'échelle changent.
+    // Le champ `ms` d'un point porte donc "la valeur" du point, en
+    // millisecondes ou en octets selon la mesure choisie.
+    var STATS_CHART_METRICS = {
+
+        watch: {
+            title: 'Temps de visionnage',
+            button: '🕒 Temps',
+            daily: 'dailyWatchTime',
+            hourly: 'hourlyWatchTime',
+            format: formatDuration,
+            axisFormat: formatAxisDuration,
+            steps: CHART_AXIS_STEPS_MS,
+            emptyTop: 60 * 60 * 1000,
+            suffix: 'cumulées sur la période',
+            color: '#9147ff',
+            colorLight: '#bf94ff',
+            glow: 'rgba(145,71,255,.45)',
+            glowStrong: 'rgba(145,71,255,.8)'
+        },
+
+        // Bleu, et surtout PAS rouge : le rouge veut déjà dire
+        // "erreur" partout ailleurs dans le dashboard (latence
+        // mauvaise, logs, suppression), une simple mesure de
+        // volume s'y lirait comme une alerte.
+        bandwidth: {
+            title: 'Bande passante',
+            button: '📶 Données',
+            daily: 'dailyBandwidth',
+            hourly: 'hourlyBandwidth',
+            format: formatBytes,
+            axisFormat: formatAxisBytes,
+            steps: CHART_AXIS_STEPS_BYTES,
+            emptyTop: 1000 * MB_BYTES,
+            suffix: 'consommés sur la période',
+            color: '#1f9cf0',
+            colorLight: '#7ad2ff',
+            glow: 'rgba(31,156,240,.45)',
+            glowStrong: 'rgba(31,156,240,.8)'
+        }
+
+    };
+
+    function getChartMetric() {
+
+        return (
+            STATS_CHART_METRICS[statsChartMetric] ||
+            STATS_CHART_METRICS.watch
+        );
+
+    }
+
+    // Renvoie les graduations, de 0 jusqu'au premier palier rond
+    // au-dessus du max de la période. L'échelle suit donc la vague :
+    // elle est recalculée à chaque changement de filtre
+    // (24h / 7j / 30j / 1 an) ET de mesure.
+    function buildChartAxisTicks(max, metric) {
+
+        // Aucune donnée sur la période : on affiche quand même une
+        // échelle par défaut, sinon la grille se réduirait à une
+        // seule ligne et le graphique aurait l'air cassé.
+        var target = max > 0 ? max : metric.emptyTop;
+
+        var rough = target / CHART_AXIS_TARGET_TICKS;
+
+        var steps = metric.steps;
+
+        var step = steps[steps.length - 1];
+
+        for (var i = 0; i < steps.length; i++) {
+
+            if (steps[i] >= rough) {
+
+                step = steps[i];
+
+                break;
+
+            }
+
+        }
+
+        var top = Math.ceil(target / step) * step;
+
+        var ticks = [];
+
+        for (var value = 0; value <= top; value += step) {
+
+            ticks.push({
+                ms: value,
+                label: metric.axisFormat(value)
+            });
+
+        }
+
+        return ticks;
+
+    }
+
     // Redessine le graphique quand la largeur du conteneur change
     // (redimensionnement de fenêtre, ouverture/fermeture de la
     // sidebar, ...) : indispensable maintenant que le viewBox est
@@ -8178,20 +13765,35 @@ dashboardButton.style.visibility =
 
         attachChartResizeObserver(container);
 
-        var buckets = getWatchTimeBuckets(statsWatchChartRange);
+        var metric = getChartMetric();
+
+        // Le halo de la courbe, le point de survol ET les boutons
+        // de mesure/période sont teintés par le CSS : on lui passe
+        // la couleur de la mesure en cours.
+        //
+        // Les variables sont posées sur le PANNEAU et non sur le
+        // canvas : les boutons sont des FRÈRES du canvas, et une
+        // variable CSS n'hérite que vers le bas — portées par le
+        // canvas elles ne les atteindraient jamais. Le canvas étant
+        // un descendant du panneau, la courbe les voit toujours.
+        var chartScope = container.closest('.tp9s-panel') || container;
+
+        chartScope.style.setProperty('--tp9-chart-color', metric.color);
+        chartScope.style.setProperty('--tp9-chart-glow', metric.glow);
+        chartScope.style.setProperty('--tp9-chart-glow-strong', metric.glowStrong);
+
+        var buckets = getChartBuckets(statsWatchChartRange, statsChartMetric);
 
         var showLabels = true;
 
         var bottomPad = showLabels ? 22 : 10;
 
-        var innerW = chartWidth - CHART_PAD_X * 2;
+        var innerW = chartWidth - CHART_PAD_LEFT - CHART_PAD_X;
         var innerH = CHART_HEIGHT - CHART_PAD_TOP - bottomPad;
 
         var max = buckets.reduce(function (acc, b) {
             return Math.max(acc, b.ms);
         }, 0);
-
-        var safeMax = max || 1;
 
         if (!buckets.length) {
 
@@ -8201,13 +13803,21 @@ dashboardButton.style.visibility =
 
         }
 
+        // Le sommet de la vague n'est plus calé sur la valeur max
+        // brute (qui ne tombe presque jamais sur un palier lisible)
+        // mais sur la dernière graduation : c'est ce qui rend les
+        // libellés de gauche exploitables à l'oeil.
+        var axisTicks = buildChartAxisTicks(max, metric);
+
+        var axisTop = axisTicks[axisTicks.length - 1].ms || 1;
+
         var points = buckets.map(function (b, i) {
 
             var x = buckets.length > 1
-                ? CHART_PAD_X + (innerW * i) / (buckets.length - 1)
-                : CHART_PAD_X + innerW / 2;
+                ? CHART_PAD_LEFT + (innerW * i) / (buckets.length - 1)
+                : CHART_PAD_LEFT + innerW / 2;
 
-            var y = CHART_PAD_TOP + innerH - (b.ms / safeMax) * innerH;
+            var y = CHART_PAD_TOP + innerH - (b.ms / axisTop) * innerH;
 
             return { x: x, y: y, ms: b.ms, label: b.label };
 
@@ -8223,6 +13833,28 @@ dashboardButton.style.visibility =
             ' L' + points[0].x + ',' + baseline +
             ' Z';
 
+        // Grille horizontale + graduations : dessinées en premier
+        // pour rester DERRIÈRE l'aire et la courbe.
+        var gridSVG = axisTicks.map(function (t) {
+
+            var y = Math.round(
+                (CHART_PAD_TOP + innerH - (t.ms / axisTop) * innerH) * 10
+            ) / 10;
+
+            return (
+                '<line class="tp9s-chart-grid-line' +
+                    (t.ms === 0 ? ' tp9s-chart-grid-base' : '') +
+                    '" x1="' + CHART_PAD_LEFT + '" y1="' + y +
+                    '" x2="' + (CHART_PAD_LEFT + innerW) + '" y2="' + y +
+                    '"></line>' +
+                '<text x="' + (CHART_PAD_LEFT - 8) + '" y="' + y +
+                    '" class="tp9s-chart-axis-label tp9s-chart-axis-label-y"' +
+                    ' text-anchor="end" dominant-baseline="middle">' +
+                    escapeHTML(t.label) + '</text>'
+            );
+
+        }).join('');
+
         var labelsSVG = showLabels
             ? points.map(function (p) {
                 return (
@@ -8237,14 +13869,15 @@ dashboardButton.style.visibility =
             '<svg class="tp9s-chart-svg" viewBox="0 0 ' + chartWidth + ' ' + CHART_HEIGHT + '">' +
                 '<defs>' +
                     '<linearGradient id="tp9sChartFill" x1="0" y1="0" x2="0" y2="1">' +
-                        '<stop offset="0%" stop-color="#9147ff" stop-opacity="0.5"/>' +
-                        '<stop offset="100%" stop-color="#9147ff" stop-opacity="0"/>' +
+                        '<stop offset="0%" stop-color="' + metric.color + '" stop-opacity="0.5"/>' +
+                        '<stop offset="100%" stop-color="' + metric.color + '" stop-opacity="0"/>' +
                     '</linearGradient>' +
                     '<linearGradient id="tp9sChartStroke" x1="0" y1="0" x2="1" y2="0">' +
-                        '<stop offset="0%" stop-color="#bf94ff"/>' +
-                        '<stop offset="100%" stop-color="#9147ff"/>' +
+                        '<stop offset="0%" stop-color="' + metric.colorLight + '"/>' +
+                        '<stop offset="100%" stop-color="' + metric.color + '"/>' +
                     '</linearGradient>' +
                 '</defs>' +
+                gridSVG +
                 '<path class="tp9s-chart-area" d="' + areaPath + '"></path>' +
                 '<path class="tp9s-chart-line" d="' + linePath + '"></path>' +
                 labelsSVG +
@@ -8256,7 +13889,6 @@ dashboardButton.style.visibility =
             '<div class="tp9s-chart-tooltip"></div>';
 
         var svg = container.querySelector('.tp9s-chart-svg');
-        var hoverGroup = container.querySelector('.tp9s-chart-hover');
         var hoverLine = container.querySelector('.tp9s-chart-hover-line');
         var hoverDot = container.querySelector('.tp9s-chart-hover-dot');
         var tooltip = container.querySelector('.tp9s-chart-tooltip');
@@ -8300,7 +13932,7 @@ dashboardButton.style.visibility =
             hoverDot.setAttribute('cx', point.x);
             hoverDot.setAttribute('cy', point.y);
 
-            tooltip.textContent = point.label + ' · ' + formatDuration(point.ms);
+            tooltip.textContent = point.label + ' · ' + metric.format(point.ms);
 
             var tooltipLeftPct = (point.x / chartWidth) * 100;
             var tooltipTopPct = (point.y / CHART_HEIGHT) * 100;
@@ -8340,7 +13972,18 @@ dashboardButton.style.visibility =
 
         var ranking = getProxyRanking24h();
 
-        var bestProxy = ranking.find(function (p) { return p.avgLatency !== null; });
+        // Le classement est trié par score : la carte "meilleure
+        // latence" doit donc chercher le minimum elle-même plutôt
+        // que de prendre le premier de la liste.
+        var bestProxy = ranking.reduce(function (best, p) {
+
+            if (p.avgLatency === null) {
+                return best;
+            }
+
+            return (!best || p.avgLatency < best.avgLatency) ? p : best;
+
+        }, null);
 
         var mostUsed = getMostUsedProxy();
 
@@ -8391,15 +14034,15 @@ dashboardButton.style.visibility =
                 '📶',
                 'BANDE PASSANTE TOTALE',
                 formatBytes(pageStats.totals.bandwidthBytesGlobal),
-                'estimation • total consommé, pas le débit actuel',
-                '#ffcf7a'
+                bandwidthSourceLabel() + ' • total consommé, pas le débit actuel',
+                '#1f9cf0'
             ),
 
             statCard(
-                '⏱',
+                '🕒',
                 'TEMPS DE VISIONNAGE',
                 formatDuration(pageStats.totals.watchTimeMsGlobal),
-                'estimation • cumulé sur tous les streamers',
+                'mesuré · lecture réelle • cumulé sur tous les streamers',
                 '#bf94ff',
                 'streamers'
             )
@@ -8473,7 +14116,9 @@ dashboardButton.style.visibility =
                     '<div class="tp9s-lead-rate">' +
                         (p.successRate !== null ? p.successRate + '% réussite' : '—') +
                     '</div>' +
-                    '<div class="tp9s-lead-usage">' + p.usage + ' util.</div>' +
+                    '<div class="tp9s-lead-usage">' +
+                        (p.score !== null ? 'score ' + p.score : '—') +
+                    '</div>' +
                 '</div>'
             );
 
@@ -8483,18 +14128,13 @@ dashboardButton.style.visibility =
 
             <div class="tp9s-cards">${primaryCards}</div>
 
-            <div class="tp9s-note">
-                ℹ️ Bande passante et temps de visionnage sont des <strong>estimations</strong>
-                (basées sur la résolution vidéo, pas une mesure réseau exacte). La bande
-                passante affichée est le <strong>total cumulé</strong> consommé depuis le
-                début, pas le débit instantané en cours.
-            </div>
+            ${buildMeasurementNoteHTML()}
 
             <div class="tp9s-panel">
                 <div class="tp9s-panel-title-row">
                     <div>
-                        <div class="tp9s-panel-title">Relais les plus rapides (7 jours)</div>
-                        <div class="tp9s-panel-sub">Classement basé sur la latence moyenne des tests réussis</div>
+                        <div class="tp9s-panel-title">Meilleurs relais (7 jours)</div>
+                        <div class="tp9s-panel-sub">Score combinant le taux de réussite et la latence moyenne</div>
                     </div>
                     <button type="button" class="tp9s-panel-link" data-nav="relais">Voir tous les relais →</button>
                 </div>
@@ -8513,6 +14153,53 @@ dashboardButton.style.visibility =
         `;
 
         renderWatchTimeChartSVG(content.querySelector('.tp9s-chart-canvas'));
+
+    }
+
+    // Libellé de la provenance des octets comptabilisés, pour ne
+    // pas faire passer une estimation pour une mesure (ni l'inverse).
+    function bandwidthSourceLabel() {
+
+        if (pageStats.bandwidthSource === 'network') {
+            return 'mesuré · réseau';
+        }
+
+        if (pageStats.bandwidthSource === 'decoder') {
+            return 'mesuré · décodeur';
+        }
+
+        return 'estimation';
+
+    }
+
+    function buildMeasurementNoteHTML() {
+
+        var measured =
+            pageStats.bandwidthSource &&
+            pageStats.bandwidthSource !== 'estimate';
+
+        if (measured) {
+
+            return (
+                '<div class="tp9s-note tp9s-note-ok">' +
+                    '✅ Ce ne sont pas des estimations : la bande passante compte les ' +
+                    '<strong>octets réellement téléchargés</strong> (' +
+                    escapeHTML(bandwidthSourceLabel()) + ') et le temps de visionnage suit la ' +
+                    '<strong>progression réelle de la lecture</strong>. La bande passante ' +
+                    'affichée reste un total cumulé, pas le débit instantané.' +
+                '</div>'
+            );
+
+        }
+
+        return (
+            '<div class="tp9s-note">' +
+                'ℹ️ Le temps de visionnage est mesuré sur la progression réelle de la ' +
+                'lecture, mais la bande passante n\'a pas pu être mesurée sur ce ' +
+                'navigateur : elle est <strong>estimée</strong> d\'après la résolution ' +
+                'vidéo. C\'est un <strong>total cumulé</strong>, pas le débit en cours.' +
+            '</div>'
+        );
 
     }
 
@@ -8550,6 +14237,7 @@ dashboardButton.style.visibility =
     // (réussite, tests, usage, bande passante, temps regardé,
     // messages), "grand = intéressant" donc décroissant.
     var RELAIS_SORT_DEFAULT_DIR = {
+        score: 'desc',
         avgLatency: 'asc',
         successRate: 'desc',
         testCount: 'desc',
@@ -8563,8 +14251,8 @@ dashboardButton.style.visibility =
         bandwidthBytes: 'desc'
     };
 
-    var statsRelaisSortKey = 'avgLatency';
-    var statsRelaisSortDir = 'asc';
+    var statsRelaisSortKey = 'score';
+    var statsRelaisSortDir = 'desc';
 
     var statsStreamersSortKey = 'watchTimeMs';
     var statsStreamersSortDir = 'desc';
@@ -8656,6 +14344,17 @@ dashboardButton.style.visibility =
                     '<div class="tp9s-td tp9s-td-name-flex">' +
                         '<div class="tp9s-avatar">' + initialLetter(p.name) + '</div>' +
                         '<span>' + escapeHTML(p.name) + '</span>' +
+                        (
+                            p.quarantined
+                                ? '<span class="tp9s-quarantine-badge"' +
+                                    ' data-tp9-tip="Relais en quarantaine"' +
+                                    ' data-tp9-tip-sub="Aucune réponse depuis des jours : écarté de' +
+                                    ' la course, mais re-testé automatiquement toutes les heures.">💤</span>'
+                                : ''
+                        ) +
+                    '</div>' +
+                    '<div class="tp9s-td tp9s-td-score">' +
+                        (p.score !== null ? p.score : '—') +
                     '</div>' +
                     '<div class="tp9s-td" style="color:' + latencyColor(p.avgLatency) + ';font-weight:700;">' +
                         (p.avgLatency !== null ? p.avgLatency + ' ms' : '—') +
@@ -8683,12 +14382,13 @@ dashboardButton.style.visibility =
 
             <div class="tp9s-panel">
                 <div class="tp9s-panel-title">Classement des relais</div>
-                <div class="tp9s-panel-sub">Latence moyenne et fiabilité sur les 7 derniers jours · clique un en-tête pour trier</div>
+                <div class="tp9s-panel-sub">Score = réussite pondérée par la latence, sur les 7 derniers jours · clique un en-tête pour trier</div>
 
                 <div class="tp9s-table">
                     <div class="tp9s-table-row tp9s-table-row-relais tp9s-table-head">
                         <div class="tp9s-td"></div>
                         <div class="tp9s-td tp9s-td-name">Proxy</div>
+                        ${sortableHeaderHTML('Score', 'relais', 'score', key, dir)}
                         ${sortableHeaderHTML('Latence 7j', 'relais', 'avgLatency', key, dir)}
                         ${sortableHeaderHTML('Réussite', 'relais', 'successRate', key, dir)}
                         ${sortableHeaderHTML('Tests 7j', 'relais', 'testCount', key, dir)}
@@ -8772,7 +14472,7 @@ dashboardButton.style.visibility =
                 );
 
             return (
-                '<div class="tp9s-table-row">' +
+                '<div class="tp9s-table-row tp9s-table-row-streamers">' +
                     '<div class="tp9s-td tp9s-td-rank">' + sortRankHTML(index) + '</div>' +
                     '<div class="tp9s-td tp9s-td-name-flex">' +
                         avatarHTML +
@@ -8796,6 +14496,15 @@ dashboardButton.style.visibility =
                     '<div class="tp9s-td">' +
                         (proxyObj ? escapeHTML(proxyObj.name) : '—') +
                     '</div>' +
+                    '<div class="tp9s-td">' +
+                        '<button type="button" class="tp9s-streamer-delete"' +
+                            ' data-channel="' + escapeHTML(channel) + '"' +
+                            ' data-tp9-tip="Supprimer cette fiche"' +
+                            ' data-tp9-tip-sub="Retire ce streamer et sa part des totaux."' +
+                            ' aria-label="Supprimer cette fiche">' +
+                            trashIconSVG(13) +
+                        '</button>' +
+                    '</div>' +
                 '</div>'
             );
 
@@ -8804,26 +14513,585 @@ dashboardButton.style.visibility =
         content.innerHTML = `
 
             <div class="tp9s-panel">
-                <div class="tp9s-panel-title">Streamers suivis</div>
-                <div class="tp9s-panel-sub">
-                    Temps de visionnage, tes messages tchat et bande passante par streamer ·
-                    clique un en-tête pour trier, ou sur le nombre de messages pour voir l'historique
+                <div class="tp9s-panel-title-row">
+                    <div>
+                        <div class="tp9s-panel-title">Streamers suivis</div>
+                        <div class="tp9s-panel-sub">
+                            Temps de visionnage, tes messages tchat et bande passante par streamer ·
+                            clique un en-tête pour trier, ou sur le nombre de messages pour voir l'historique
+                        </div>
+                    </div>
+                    <button type="button" class="tp9s-panel-link tp9s-streamers-clean">
+                        Nettoyer les fiches fantômes
+                    </button>
                 </div>
 
                 <div class="tp9s-table">
-                    <div class="tp9s-table-row tp9s-table-head">
+                    <div class="tp9s-table-row tp9s-table-row-streamers tp9s-table-head">
                         <div class="tp9s-td"></div>
                         <div class="tp9s-td tp9s-td-name">Streamer</div>
                         ${sortableHeaderHTML('Temps regardé', 'streamers', 'watchTimeMs', key, dir)}
                         ${sortableHeaderHTML('Tes messages', 'streamers', 'chatMessages', key, dir)}
                         ${sortableHeaderHTML('Bande passante (total)', 'streamers', 'bandwidthBytes', key, dir)}
                         <div class="tp9s-td">Proxy principal</div>
+                        <div class="tp9s-td"></div>
                     </div>
                     ${
                         rows ||
                         '<div class="tp9s-empty">Regarde un stream pour commencer à collecter des stats.</div>'
                     }
                 </div>
+            </div>
+
+        `;
+
+    }
+
+    // Retire une fiche streamer ET sa contribution aux totaux
+    // globaux. L'historique journalier et la carte des habitudes ne
+    // sont pas décomposables par streamer : ils restent inchangés,
+    // et la confirmation le dit clairement.
+    function deleteStreamerStats(channel) {
+
+        var streamer = pageStats.streamers[channel];
+
+        if (!streamer) {
+            return;
+        }
+
+        if (
+            !confirm(
+                'Supprimer la fiche de ' + getStreamerDisplayName(channel) + ' ?\n\n' +
+                'Son temps de visionnage, ses messages et sa bande passante seront ' +
+                'retirés des totaux.\n' +
+                'Le graphique et la carte des habitudes ne sont pas décomposables ' +
+                'par streamer : ils resteront inchangés.'
+            )
+        ) {
+            return;
+        }
+
+        subtractStreamerFromTotals(streamer);
+
+        delete pageStats.streamers[channel];
+
+        saveStatsNow();
+
+        logEvent('warn', 'Fiche streamer supprimée : ' + channel);
+
+        renderStatsDashboard();
+
+    }
+
+    function subtractStreamerFromTotals(streamer) {
+
+        pageStats.totals.watchTimeMsGlobal = Math.max(
+            0,
+            pageStats.totals.watchTimeMsGlobal - (streamer.watchTimeMs || 0)
+        );
+
+        pageStats.totals.chatMessagesGlobal = Math.max(
+            0,
+            pageStats.totals.chatMessagesGlobal - (streamer.chatMessages || 0)
+        );
+
+        pageStats.totals.bandwidthBytesGlobal = Math.max(
+            0,
+            pageStats.totals.bandwidthBytesGlobal - (streamer.bandwidthBytes || 0)
+        );
+
+    }
+
+    // Fiches créées par un aperçu automatique (accueil, Parcourir)
+    // avant que getActivePlayback() ne filtre ces lectures : de la
+    // bande passante, mais aucun visionnage ni message.
+    function cleanPhantomStreamers() {
+
+        var phantoms = Object.keys(pageStats.streamers).filter(function (channel) {
+
+            var s = pageStats.streamers[channel];
+
+            return !s.watchTimeMs && !s.chatMessages;
+
+        });
+
+        if (!phantoms.length) {
+
+            alert(
+                'Aucune fiche fantôme : tous tes streamers ont du temps de ' +
+                'visionnage ou des messages.'
+            );
+
+            return;
+
+        }
+
+        var preview = phantoms.slice(0, 15).join(', ') +
+            (phantoms.length > 15 ? ', …' : '');
+
+        if (
+            !confirm(
+                'Supprimer ' + phantoms.length +
+                ' fiche(s) sans aucun visionnage ni message ?\n\n' + preview
+            )
+        ) {
+            return;
+        }
+
+        phantoms.forEach(function (channel) {
+
+            subtractStreamerFromTotals(pageStats.streamers[channel]);
+
+            delete pageStats.streamers[channel];
+
+        });
+
+        saveStatsNow();
+
+        logEvent(
+            'warn',
+            phantoms.length + ' fiche(s) streamer fantôme(s) supprimée(s)'
+        );
+
+        renderStatsDashboard();
+
+    }
+
+    // ------------------------------------------------------------
+    // ONGLET HABITUDES (heatmap 7 x 24)
+    // ------------------------------------------------------------
+
+    // Lundi en premier (getDay() renvoie 0 pour dimanche).
+    var HEATMAP_DAY_ORDER = [1, 2, 3, 4, 5, 6, 0];
+
+    // Une couleur par jour : sept barres du même violet ne se
+    // distinguaient que par leur longueur, et l'œil devait faire
+    // l'aller-retour jusqu'au libellé pour savoir à qui elles
+    // appartenaient. Aucun rouge : il veut dire « erreur » partout
+    // ailleurs dans le dashboard.
+    var WEEKDAY_COLORS = {
+        1: '#9147ff',
+        2: '#4fc3f7',
+        3: '#00d084',
+        4: '#ffcf7a',
+        5: '#ff9d4d',
+        6: '#ff8fd6',
+        0: '#2dd4bf'
+    };
+
+    function getSessionStats() {
+
+        var counted = (pageStats.sessions || []).filter(function (s) {
+            return s && s.ms > 0;
+        });
+
+        if (!counted.length) {
+            return { count: 0, averageMs: 0, longest: null };
+        }
+
+        var totalMs = counted.reduce(function (acc, s) {
+            return acc + s.ms;
+        }, 0);
+
+        var longest = counted.reduce(function (best, s) {
+            return (!best || s.ms > best.ms) ? s : best;
+        }, null);
+
+        return {
+            count: counted.length,
+            averageMs: Math.round(totalMs / counted.length),
+            longest: longest,
+            recent: counted.slice(-10).reverse()
+        };
+
+    }
+
+    // Jours consécutifs avec du visionnage, en remontant depuis
+    // aujourd'hui. La journée en cours ne casse pas la série tant
+    // qu'elle est vide : on repart alors d'hier. La boucle se termine
+    // forcément, dailyWatchTime étant purgé au-delà d'un an.
+    function getCurrentWatchStreak() {
+
+        var streak = 0;
+
+        var day = new Date();
+
+        if (!pageStats.dailyWatchTime[dateKeyFor(day)]) {
+            day.setDate(day.getDate() - 1);
+        }
+
+        while (pageStats.dailyWatchTime[dateKeyFor(day)]) {
+
+            streak++;
+
+            day.setDate(day.getDate() - 1);
+
+        }
+
+        return streak;
+
+    }
+
+    function heatmapLevelClass(ms, max) {
+
+        if (!ms) {
+            return '';
+        }
+
+        var ratio = ms / max;
+
+        if (ratio > 0.75) return ' tp9s-heat-l4';
+        if (ratio > 0.5) return ' tp9s-heat-l3';
+        if (ratio > 0.25) return ' tp9s-heat-l2';
+
+        return ' tp9s-heat-l1';
+
+    }
+
+    // Cumul par jour de semaine reconstruit depuis l'historique
+    // JOURNALIER (jusqu'à 370 jours conservés) : contrairement à la
+    // heatmap, qui ne peut se remplir qu'à partir de maintenant,
+    // cette répartition est disponible immédiatement pour qui a déjà
+    // de l'historique.
+    function getWatchTimeByWeekday() {
+
+        var totals = [0, 0, 0, 0, 0, 0, 0];
+
+        Object.keys(pageStats.dailyWatchTime).forEach(function (key) {
+
+            var parts = key.split('-');
+
+            if (parts.length !== 3) {
+                return;
+            }
+
+            var date = new Date(
+                parseInt(parts[0], 10),
+                parseInt(parts[1], 10) - 1,
+                parseInt(parts[2], 10)
+            );
+
+            if (isNaN(date.getTime())) {
+                return;
+            }
+
+            totals[date.getDay()] += pageStats.dailyWatchTime[key];
+
+        });
+
+        return totals;
+
+    }
+
+    // Date courte et lisible pour une session ("mar. 18/09 21:30").
+    function formatSessionDate(timestamp) {
+
+        try {
+
+            return new Date(timestamp).toLocaleString(
+                [],
+                {
+                    weekday: 'short',
+                    day: '2-digit',
+                    month: '2-digit',
+                    hour: '2-digit',
+                    minute: '2-digit'
+                }
+            );
+
+        } catch (e) {
+
+            return '—';
+
+        }
+
+    }
+
+    function renderStatsHabitudes(content) {
+
+        var sessionStats = getSessionStats();
+
+        var streak = getCurrentWatchStreak();
+
+        var heatmap = pageStats.watchHeatmap || {};
+
+        var max = 0;
+        var total = 0;
+
+        var byDay = [0, 0, 0, 0, 0, 0, 0];
+        var byHour = [];
+
+        for (var h = 0; h < 24; h++) {
+            byHour.push(0);
+        }
+
+        Object.keys(heatmap).forEach(function (key) {
+
+            var ms = heatmap[key] || 0;
+
+            var parts = key.split('-');
+
+            var day = parseInt(parts[0], 10);
+            var hour = parseInt(parts[1], 10);
+
+            if (isNaN(day) || isNaN(hour)) {
+                return;
+            }
+
+            total += ms;
+
+            byDay[day] += ms;
+            byHour[hour] += ms;
+
+            if (ms > max) {
+                max = ms;
+            }
+
+        });
+
+        var bestDay = null;
+        var bestHour = null;
+
+        byDay.forEach(function (ms, day) {
+
+            if (ms > 0 && (bestDay === null || ms > byDay[bestDay])) {
+                bestDay = day;
+            }
+
+        });
+
+        byHour.forEach(function (ms, hour) {
+
+            if (ms > 0 && (bestHour === null || ms > byHour[bestHour])) {
+                bestHour = hour;
+            }
+
+        });
+
+        var cards = [
+
+            statCard(
+                '📅',
+                'JOUR LE PLUS ACTIF',
+                bestDay !== null ? DAY_LABELS_FULL[bestDay] : '—',
+                bestDay !== null ? formatDuration(byDay[bestDay]) + ' cumulées' : 'aucune donnée',
+                '#bf94ff'
+            ),
+
+            statCard(
+                '⏰',
+                'HEURE DE POINTE',
+                bestHour !== null ? pad2(bestHour) + 'h — ' + pad2((bestHour + 1) % 24) + 'h' : '—',
+                bestHour !== null ? formatDuration(byHour[bestHour]) + ' cumulées' : 'aucune donnée',
+                '#ff9d4d'
+            ),
+
+            statCard(
+                '📆',
+                'TOTAL CARTOGRAPHIÉ',
+                formatDuration(total),
+                'depuis la mise en place du suivi horaire',
+                '#00d084'
+            ),
+
+            statCard(
+                '🕒',
+                'SESSION MOYENNE',
+                sessionStats.count ? formatDuration(sessionStats.averageMs) : '—',
+                sessionStats.count
+                    ? sessionStats.count + ' session(s) enregistrée(s)'
+                    : 'aucune session enregistrée',
+                '#4fc3f7'
+            ),
+
+            statCard(
+                '🏆',
+                'PLUS LONGUE SESSION',
+                sessionStats.longest
+                    ? formatDuration(sessionStats.longest.ms)
+                    : '—',
+                sessionStats.longest
+                    ? 'le ' + formatSessionDate(sessionStats.longest.start)
+                    : 'aucune donnée',
+                '#ff8fd6'
+            ),
+
+            statCard(
+                '🔥',
+                'SÉRIE EN COURS',
+                streak ? streak + ' jour(s)' : '—',
+                streak
+                    ? 'jours consécutifs avec du visionnage'
+                    : 'aucune série en cours',
+                '#ffcf7a'
+            )
+
+        ].join('');
+
+        // ---- grille heatmap ----
+
+        var headerCells = '<div></div>';
+
+        for (var hour = 0; hour < 24; hour++) {
+
+            headerCells +=
+                '<div class="tp9s-heat-hour">' +
+                    (hour % 3 === 0 ? pad2(hour) + 'h' : '') +
+                '</div>';
+
+        }
+
+        headerCells += '<div></div>';
+
+        var safeMax = max || 1;
+
+        var rows = HEATMAP_DAY_ORDER.map(function (day) {
+
+            var cells =
+                '<div class="tp9s-heat-day">' +
+                    escapeHTML(DAY_LABELS_FULL[day]) +
+                '</div>';
+
+            for (var hour = 0; hour < 24; hour++) {
+
+                var ms = heatmap[day + '-' + hour] || 0;
+
+                // Deux lignes plutôt qu'un tiret cadratin : on
+                // maîtrise le rendu de la bulle, autant s'en servir.
+                var tipTitle =
+                    DAY_LABELS_FULL[day] + ' · ' + pad2(hour) + 'h — ' +
+                    pad2((hour + 1) % 24) + 'h';
+
+                var tipSub = ms
+                    ? formatDuration(ms) + ' de visionnage'
+                    : 'aucun visionnage';
+
+                cells +=
+                    '<div class="tp9s-heat-cell' + heatmapLevelClass(ms, safeMax) +
+                        '" data-tp9-tip="' + escapeHTML(tipTitle) + '"' +
+                        ' data-tp9-tip-sub="' + escapeHTML(tipSub) + '"></div>';
+
+            }
+
+            cells +=
+                '<div class="tp9s-heat-total">' +
+                    (byDay[day] ? escapeHTML(formatDuration(byDay[day])) : '—') +
+                '</div>';
+
+            return cells;
+
+        }).join('');
+
+        var legend =
+            '<div class="tp9s-heat-legend">' +
+                '<span>Moins</span>' +
+                '<span class="tp9s-heat-cell"></span>' +
+                '<span class="tp9s-heat-cell tp9s-heat-l1"></span>' +
+                '<span class="tp9s-heat-cell tp9s-heat-l2"></span>' +
+                '<span class="tp9s-heat-cell tp9s-heat-l3"></span>' +
+                '<span class="tp9s-heat-cell tp9s-heat-l4"></span>' +
+                '<span>Plus</span>' +
+            '</div>';
+
+        // ---- répartition par jour de semaine (historique complet) ----
+
+        var sessionRows = (sessionStats.recent || []).map(function (s) {
+
+            var percent = (sessionStats.longest && sessionStats.longest.ms)
+                ? Math.max(4, Math.round((s.ms / sessionStats.longest.ms) * 100))
+                : 0;
+
+            return (
+                '<div class="tp9s-bar-row tp9s-session-row">' +
+                    '<div>' + escapeHTML(formatSessionDate(s.start)) + '</div>' +
+                    '<div class="tp9s-bar-track">' +
+                        '<div class="tp9s-bar-fill" style="width:' + percent + '%"></div>' +
+                    '</div>' +
+                    '<div class="tp9s-bar-value">' +
+                        escapeHTML(formatDuration(s.ms)) +
+                    '</div>' +
+                '</div>'
+            );
+
+        }).join('');
+
+        var weekdayTotals = getWatchTimeByWeekday();
+
+        var weekdayMax = weekdayTotals.reduce(function (acc, ms) {
+            return Math.max(acc, ms);
+        }, 0);
+
+        var weekdayRows = HEATMAP_DAY_ORDER.map(function (day) {
+
+            var ms = weekdayTotals[day];
+
+            var percent = weekdayMax ? Math.round((ms / weekdayMax) * 100) : 0;
+
+            var color = WEEKDAY_COLORS[day];
+
+            return (
+                '<div class="tp9s-bar-row">' +
+                    '<div class="tp9s-bar-label">' +
+                        '<span class="tp9s-bar-dot" style="background:' + color + '"></span>' +
+                        escapeHTML(DAY_LABELS_FULL[day]) +
+                    '</div>' +
+                    '<div class="tp9s-bar-track">' +
+                        '<div class="tp9s-bar-fill" style="width:' + percent +
+                            '%;--bar:' + color + '"></div>' +
+                    '</div>' +
+                    '<div class="tp9s-bar-value" style="color:' + color + '">' +
+                        escapeHTML(formatDuration(ms)) +
+                    '</div>' +
+                '</div>'
+            );
+
+        }).join('');
+
+        content.innerHTML = `
+
+            <div class="tp9s-cards">${cards}</div>
+
+            <div class="tp9s-panel">
+                <div class="tp9s-panel-title">Carte de tes sessions</div>
+                <div class="tp9s-panel-sub">
+                    Chaque case = une heure de la semaine, plus elle est violette plus tu
+                    regardes à ce moment-là · survole une case pour le détail
+                </div>
+
+                ${
+                    total
+                        ? '<div class="tp9s-heat-grid">' + headerCells + rows + '</div>' + legend
+                        : '<div class="tp9s-empty">' +
+                              'Cette carte se construit au fil de tes sessions : reviens dans quelques jours.' +
+                          '</div>'
+                }
+            </div>
+
+            <div class="tp9s-panel">
+                <div class="tp9s-panel-title">Dernières sessions</div>
+                <div class="tp9s-panel-sub">
+                    Un bloc de visionnage continu : plus de 10 minutes d'interruption
+                    et une nouvelle session commence
+                </div>
+
+                ${
+                    sessionRows ||
+                    '<div class="tp9s-empty">Aucune session enregistrée pour le moment.</div>'
+                }
+            </div>
+
+            <div class="tp9s-panel">
+                <div class="tp9s-panel-title">Répartition par jour de la semaine</div>
+                <div class="tp9s-panel-sub">
+                    Basée sur tout l'historique journalier conservé (jusqu'à un an), pas
+                    seulement sur la carte ci-dessus
+                </div>
+
+                ${
+                    weekdayMax
+                        ? weekdayRows
+                        : '<div class="tp9s-empty">Aucun historique de visionnage pour le moment.</div>'
+                }
             </div>
 
         `;
@@ -8852,8 +15120,17 @@ dashboardButton.style.visibility =
             <div class="tp9-chat-modal-box">
 
                 <div class="tp9-chat-modal-header">
-                    <div class="tp9-chat-modal-title"></div>
+
+                    <div class="tp9-chat-modal-who">
+                        <div class="tp9-chat-modal-avatar"></div>
+                        <div class="tp9-chat-modal-ident">
+                            <div class="tp9-chat-modal-title"></div>
+                            <div class="tp9-chat-modal-sub"></div>
+                        </div>
+                    </div>
+
                     <button type="button" class="tp9-chat-modal-close">×</button>
+
                 </div>
 
                 <div class="tp9-chat-modal-list"></div>
@@ -8863,6 +15140,8 @@ dashboardButton.style.visibility =
         `;
 
         document.body.appendChild(chatHistoryModal);
+
+        attachSpotlight(chatHistoryModal);
 
         chatHistoryModal
             .querySelector('.tp9-chat-modal-backdrop')
@@ -8896,6 +15175,38 @@ dashboardButton.style.visibility =
 
     }
 
+    // Libellé de séparation entre deux journées de messages.
+    function formatChatDay(date) {
+
+        var key = dateKeyFor(date);
+
+        var today = new Date();
+
+        if (key === dateKeyFor(today)) {
+            return "Aujourd'hui";
+        }
+
+        today.setDate(today.getDate() - 1);
+
+        if (key === dateKeyFor(today)) {
+            return 'Hier';
+        }
+
+        try {
+
+            return date.toLocaleDateString(
+                [],
+                { weekday: 'long', day: 'numeric', month: 'long' }
+            );
+
+        } catch (e) {
+
+            return key;
+
+        }
+
+    }
+
     function showChatHistoryModal(channel) {
 
         var modal = ensureChatHistoryModal();
@@ -8906,26 +15217,53 @@ dashboardButton.style.visibility =
 
         var displayName = getStreamerDisplayName(channel);
 
-        modal.querySelector('.tp9-chat-modal-title').textContent =
-            'Messages envoyés à ' + displayName + ' (' + messages.length + ')';
+        var avatarUrl = getStreamerAvatarUrl(channel);
+
+        modal.querySelector('.tp9-chat-modal-avatar').innerHTML =
+            avatarUrl
+                ? '<img src="' + escapeHTML(avatarUrl) + '" alt="">'
+                : initialLetter(displayName);
+
+        modal.querySelector('.tp9-chat-modal-title').textContent = displayName;
+
+        modal.querySelector('.tp9-chat-modal-sub').textContent =
+            messages.length + ' message' + (messages.length > 1 ? 's' : '') +
+            ' envoyé' + (messages.length > 1 ? 's' : '');
+
+        // Les messages sont regroupés par journée : sans ça, la date
+        // était répétée sur chaque ligne alors qu'une conversation
+        // tient souvent sur quelques minutes.
+        var lastDayKey = null;
 
         var rows = messages
             .map(function (entry) {
 
-                var time = new Date(entry.t).toLocaleString(
-                    [],
-                    {
-                        day: '2-digit',
-                        month: '2-digit',
-                        hour: '2-digit',
-                        minute: '2-digit'
-                    }
-                );
+                var date = new Date(entry.t);
+
+                var dayKey = dateKeyFor(date);
+
+                var separator = '';
+
+                if (dayKey !== lastDayKey) {
+
+                    lastDayKey = dayKey;
+
+                    separator =
+                        '<div class="tp9-chat-day">' +
+                            '<span>' + escapeHTML(formatChatDay(date)) + '</span>' +
+                        '</div>';
+
+                }
 
                 return (
-                    '<div class="tp9-chat-modal-row">' +
-                        '<span class="tp9-chat-modal-time">' + escapeHTML(time) + '</span>' +
-                        '<span class="tp9-chat-modal-text">' + escapeHTML(entry.text) + '</span>' +
+                    separator +
+                    '<div class="tp9-chat-row">' +
+                        '<span class="tp9-chat-time">' +
+                            pad2(date.getHours()) + ':' + pad2(date.getMinutes()) +
+                        '</span>' +
+                        '<span class="tp9-chat-bubble">' +
+                            escapeHTML(entry.text) +
+                        '</span>' +
                     '</div>'
                 );
 
@@ -8943,6 +15281,196 @@ dashboardButton.style.visibility =
         listEl.scrollTop = listEl.scrollHeight;
 
         modal.style.display = 'flex';
+
+    }
+
+    // ------------------------------------------------------------
+    // ONGLET SAUVEGARDE
+    // ------------------------------------------------------------
+
+    function renderStatsBackup(content) {
+
+        var supported = supportsFileBackup();
+
+        // backupHandleCached fait foi dès qu'il est chargé ; l'état
+        // persistant sert de repli le temps que IndexedDB réponde.
+        var configured =
+            !!backupHandleCached ||
+            (!!backupState.fileName && backupState.lastBackupMode === 'file');
+
+        var statusIcon;
+        var statusTitle;
+        var statusText;
+        var statusHint = '';
+        var accent;
+
+        // Une phrase pour l'état, une ligne d'astuce pour la marche
+        // à suivre : un pavé de texte dans une interface, personne
+        // ne le lit.
+        if (!supported) {
+
+            statusIcon = '📥';
+            statusTitle = 'Sauvegarde manuelle';
+            accent = '#ffcf7a';
+            statusText =
+                'Ton navigateur ne laisse pas un script écrire dans un fichier : ' +
+                'chaque sauvegarde part dans ton dossier Téléchargements.';
+            statusHint =
+                'Pour choisir où l\'enregistrer et remplacer l\'ancienne, active ' +
+                '« Toujours demander où enregistrer les fichiers » dans ton navigateur.';
+
+        } else if (backupNeedsPermission) {
+
+            statusIcon = '🔐';
+            statusTitle = 'Autorisation à renouveler';
+            accent = '#ff6b6b';
+            statusText =
+                'Le navigateur a oublié l\'autorisation d\'écrire dans ton fichier.';
+            statusHint =
+                'Un clic sur « Sauvegarder maintenant » suffit à la redonner.';
+
+        } else if (configured) {
+
+            statusIcon = '✅';
+            statusTitle = 'Sauvegarde automatique active';
+            accent = '#00d084';
+            statusText =
+                'Réécrite dans ' + backupState.fileName + ' toutes les 15 minutes, ' +
+                'tant qu\'un onglet Twitch est ouvert.';
+
+        } else {
+
+            statusIcon = '⚠️';
+            statusTitle = 'Aucune sauvegarde configurée';
+            accent = '#ffcf7a';
+            statusText =
+                'Tes statistiques n\'existent que dans le stockage local de twitch.tv.';
+            statusHint =
+                'Choisis un fichier une fois : le script y réécrira tout seul ensuite.';
+
+        }
+
+        content.innerHTML = `
+
+            <div class="tp9s-panel">
+
+                <div class="tp9s-backup-status" style="--accent:${accent}">
+                    <div class="tp9s-backup-icon">${statusIcon}</div>
+                    <div>
+                        <div class="tp9s-panel-title">${escapeHTML(statusTitle)}</div>
+                        <div class="tp9s-backup-desc">${escapeHTML(statusText)}</div>
+                        ${
+                            statusHint
+                                ? '<div class="tp9s-backup-hint">💡 ' +
+                                    escapeHTML(statusHint) + '</div>'
+                                : ''
+                        }
+                    </div>
+                </div>
+
+                <div class="tp9s-backup-meta">
+                    <div>
+                        <span class="tp9s-backup-meta-label">Dernière sauvegarde</span>
+                        <span class="tp9s-backup-meta-value">
+                            ${escapeHTML(formatBackupDate(backupState.lastBackupAt))}
+                        </span>
+                    </div>
+                    <div>
+                        <span class="tp9s-backup-meta-label">Fichier</span>
+                        <span class="tp9s-backup-meta-value">
+                            ${escapeHTML(backupState.fileName || '—')}
+                        </span>
+                    </div>
+                </div>
+
+                <div class="tp9s-backup-actions">
+
+                    ${
+                        supported
+                            ? '<button type="button" class="tp9s-backup-btn tp9s-backup-primary" data-backup="choose">' +
+                                (configured ? '💾 Sauvegarder maintenant' : '💾 Choisir le fichier de sauvegarde') +
+                              '</button>'
+                            : ''
+                    }
+
+                    <button type="button" class="tp9s-backup-btn" data-backup="download">
+                        📤 Exporter un fichier
+                    </button>
+
+                    <button type="button" class="tp9s-backup-btn" data-backup="restore">
+                        📥 Restaurer une sauvegarde
+                    </button>
+
+                    ${
+                        configured
+                            ? '<button type="button" class="tp9s-backup-btn" data-backup="forget">' +
+                                '🔄 Changer de fichier' +
+                              '</button>'
+                            : ''
+                    }
+
+                </div>
+
+                <input type="file" class="tp9s-backup-file" accept="application/json" style="display:none;">
+
+            </div>
+
+            <div class="tp9s-note">
+                ℹ️ La restauration <strong>fusionne</strong> avec tes stats actuelles en
+                gardant la valeur la plus complète : rien n'est jamais compté en double.
+            </div>
+
+        `;
+
+        var fileInput = content.querySelector('.tp9s-backup-file');
+
+        fileInput.addEventListener('change', function (event) {
+
+            var file = event.target.files && event.target.files[0];
+
+            if (file) {
+                importStatsBackupFromFile(file);
+            }
+
+            event.target.value = '';
+
+        });
+
+        content.querySelectorAll('[data-backup]').forEach(function (button) {
+
+            button.addEventListener('click', function () {
+
+                var action = button.getAttribute('data-backup');
+
+                if (action === 'choose') {
+
+                    if (configured) {
+
+                        writeStatsBackup(false);
+
+                    } else {
+
+                        chooseStatsBackupFile();
+
+                    }
+
+                } else if (action === 'download') {
+
+                    downloadStatsBackup();
+
+                } else if (action === 'restore') {
+
+                    fileInput.click();
+
+                } else if (action === 'forget') {
+
+                    chooseStatsBackupFile();
+
+                }
+
+            });
+
+        });
 
     }
 
@@ -8982,7 +15510,7 @@ dashboardButton.style.visibility =
                         <div class="tp9s-panel-title">Journal des événements</div>
                         <div class="tp9s-panel-sub">${pageStats.logs.length} événement(s) enregistré(s)</div>
                     </div>
-                    <button type="button" class="tp9s-clear-logs">🗑 Vider les logs</button>
+                    <button type="button" class="tp9s-clear-logs">${trashIconSVG(13)} Vider les logs</button>
                 </div>
 
                 <div class="tp9s-logs">
@@ -9055,7 +15583,25 @@ dashboardButton.style.visibility =
         'jobs',
         'turbo',
         'prime',
-        'store'
+        'store',
+
+        // Ajoutés après coup : toute route absente de cette liste
+        // est prise pour un nom de chaîne.
+        'team',
+        'u',
+        'collections',
+        'dashboard',
+        'following',
+        'subs',
+        'bits',
+        'broadcast',
+        'activate',
+        'checkout',
+        'redeem',
+        'directory',
+
+        // URL bidon utilisée par openStatsDashboardInNewTab().
+        'tp9proxydashboard'
     ];
 
 
@@ -9255,6 +15801,78 @@ dashboardButton.style.visibility =
     }
 
 
+    // Teste une liste de relais l'un après l'autre, puis passe la
+    // salve complète à la logique de quarantaine (qui a besoin de
+    // voir TOUS les résultats d'un coup pour savoir si la salve
+    // était concluante).
+    async function runProxyTestRound(list, channel, updateUI) {
+
+        var roundResults = [];
+
+        for (var i = 0; i < list.length; i++) {
+
+            var proxy = list[i];
+
+            if (updateUI) {
+
+                updateProxyStatus(
+                    proxy.id,
+                    '🟡 test...'
+                );
+
+            }
+
+            var result = await testProxy(proxy, channel);
+
+            proxy.lastTest = {
+                ok: result.ok,
+                status: result.ok ? 'OK' : result.status,
+                latency: result.latency,
+                timestamp: Date.now(),
+                channel: channel
+            };
+
+            if (proxy.quarantine) {
+                proxy.quarantine.lastProbe = Date.now();
+            }
+
+            var entry = recordProxyTest(
+                proxy.id,
+                result.ok,
+                result.latency
+            );
+
+            roundResults.push({
+                proxy: proxy,
+                ok: result.ok,
+                entry: entry
+            });
+
+            if (updateUI) {
+
+                updateProxyStatus(
+                    proxy.id,
+                    result.ok
+                        ? '🟢 OK · ' + result.latency + ' ms'
+                        : '🔴 ' + result.status +
+                            (result.latency ? ' · ' + result.latency + ' ms' : '')
+                );
+
+            }
+
+        }
+
+        applyQuarantineRules(roundResults);
+
+        saveConfig(pageConfig);
+
+        broadcastConfig();
+
+        return roundResults;
+
+    }
+
+
     async function testAllProxies() {
 
         if (testInProgress) {
@@ -9283,6 +15901,9 @@ dashboardButton.style.visibility =
         }
 
 
+        // Test lancé à la main : on teste TOUT ce qui est coché, y
+        // compris les relais en quarantaine (c'est justement
+        // l'occasion pour eux de s'en sortir).
         var enabled =
             pageConfig.proxies.filter(
                 function (p) {
@@ -9310,103 +15931,9 @@ dashboardButton.style.visibility =
                 '[TwitchProxy] ===== TEST PROXYS ====='
             );
 
+            await runProxyTestRound(enabled, channel, true);
 
-            for (
-                var i = 0;
-                i < enabled.length;
-                i++
-            ) {
-
-                var proxy =
-                    enabled[i];
-
-
-                updateProxyStatus(
-                    proxy.id,
-                    '🟡 test...'
-                );
-
-
-                var result =
-                    await testProxy(
-                        proxy,
-                        channel
-                    );
-
-
-                // ----------------------------------------------------
-                // NOUVEAU
-                // Sauvegarde du dernier résultat
-                // ----------------------------------------------------
-
-                proxy.lastTest = {
-
-                    ok:
-                        result.ok,
-
-                    status:
-                        result.ok
-                            ? 'OK'
-                            : result.status,
-
-                    latency:
-                        result.latency,
-
-                    timestamp:
-                        Date.now(),
-
-                    channel:
-                        channel
-
-                };
-
-
-                recordProxyTest(
-                    proxy.id,
-                    result.ok,
-                    result.latency
-                );
-
-
-                saveConfig(
-                    pageConfig
-                );
-
-
-                broadcastConfig();
-
-
-                if (result.ok) {
-
-                    updateProxyStatus(
-                        proxy.id,
-                        '🟢 OK · ' +
-                        result.latency +
-                        ' ms'
-                    );
-
-                } else {
-
-                    updateProxyStatus(
-                        proxy.id,
-                        '🔴 ' +
-                        result.status +
-                        (
-                            result.latency
-                                ? ' · ' +
-                                  result.latency +
-                                  ' ms'
-                                : ''
-                        )
-                    );
-
-                }
-
-            }
-
-
-            updateCurrentTestInfo();
-
+            renderDashboard();
 
             console.log(
                 '[TwitchProxy] ===== FIN TEST ====='
@@ -9450,82 +15977,6 @@ dashboardButton.style.visibility =
 
 
     // ============================================================
-    // CHANNEL CACHE
-    // ============================================================
-
-    function saveLastWorkingProxy(
-        channel,
-        proxyId
-    ) {
-
-        try {
-
-            var data = {};
-
-            var existing =
-                localStorage.getItem(
-                    CHANNEL_CACHE_KEY
-                );
-
-
-            if (existing) {
-
-                data =
-                    JSON.parse(existing);
-
-            }
-
-
-            data[channel] =
-                proxyId;
-
-
-            localStorage.setItem(
-                CHANNEL_CACHE_KEY,
-                JSON.stringify(data)
-            );
-
-        } catch (e) {}
-
-    }
-
-
-    function getLastWorkingProxy(
-        channel
-    ) {
-
-        try {
-
-            var existing =
-                localStorage.getItem(
-                    CHANNEL_CACHE_KEY
-                );
-
-
-            if (!existing) {
-                return null;
-            }
-
-
-            var data =
-                JSON.parse(existing);
-
-
-            return (
-                data[channel] ||
-                null
-            );
-
-        } catch (e) {
-
-            return null;
-
-        }
-
-    }
-
-
-    // ============================================================
     // CODE INJECTÉ DANS LE WORKER
     // ============================================================
 
@@ -9555,6 +16006,12 @@ dashboardButton.style.visibility =
         lines.push(
             'var __tp_config = ' +
             workerConfig +
+            ';'
+        );
+
+        lines.push(
+            'var __tp_tabId = ' +
+            JSON.stringify(TAB_ID) +
             ';'
         );
 
@@ -9837,6 +16294,110 @@ dashboardButton.style.visibility =
 
 
         // --------------------------------------------------------
+        // Mesure de la bande passante réelle
+        // --------------------------------------------------------
+        //
+        // Les segments vidéo (.ts / .m4s / ...) passent par ce même
+        // fetch que celui qu'on patche pour usher : on relève leur
+        // taille réelle au passage, ce qui remplace l'ancienne
+        // estimation "bitrate d'après la résolution". On lit
+        // d'abord Content-Length (en-tête autorisé en CORS, donc
+        // lisible même sur un domaine tiers, et gratuit) ; s'il
+        // manque, on mesure sur une COPIE de la réponse pour ne pas
+        // consommer le corps attendu par le lecteur.
+
+        lines.push(`
+
+            var __tp_lastChannel = null;
+            var __tp_pendingBytes = 0;
+
+            function __tp_isSegmentURL(lowerURL){
+
+                if (lowerURL.indexOf(".m3u8") >= 0) {
+                    return false;
+                }
+
+                return (
+                    /\.(ts|m4s|mp4|m4v|m4a|aac|fmp4)([?#]|$)/i.test(lowerURL)
+                    ||
+                    lowerURL.indexOf("/v1/segment/") >= 0
+                );
+
+            }
+
+            function __tp_measureResponse(promise){
+
+                return promise.then(function(response){
+
+                    try {
+
+                        var len =
+                            response.headers.get("content-length");
+
+                        if (len) {
+
+                            var parsed = parseInt(len, 10);
+
+                            if (parsed > 0) {
+
+                                __tp_pendingBytes += parsed;
+
+                                return response;
+
+                            }
+
+                        }
+
+                        response
+                            .clone()
+                            .arrayBuffer()
+                            .then(function(buffer){
+
+                                __tp_pendingBytes += buffer.byteLength;
+
+                            })
+                            .catch(function(){});
+
+                    } catch(e) {}
+
+                    return response;
+
+                });
+
+            }
+
+            setInterval(
+                function(){
+
+                    if (
+                        __tp_pendingBytes > 0 &&
+                        __tp_lastChannel &&
+                        __tp_bc
+                    ) {
+
+                        try {
+
+                            __tp_bc.postMessage({
+                                type: "bandwidth",
+                                tabId: __tp_tabId,
+                                channel: __tp_lastChannel,
+                                bytes: __tp_pendingBytes
+                            });
+
+                        } catch(e) {}
+
+                        __tp_pendingBytes = 0;
+
+                    }
+
+                },
+                5000
+            );
+
+        `);
+
+
+        // --------------------------------------------------------
         // Hook fetch
         // --------------------------------------------------------
 
@@ -9882,11 +16443,16 @@ dashboardButton.style.visibility =
 
                 if (!isUsher) {
 
-                    return __tp_originalFetch.call(
-                        this,
-                        input,
-                        init
-                    );
+                    var __tp_passthrough =
+                        __tp_originalFetch.call(
+                            this,
+                            input,
+                            init
+                        );
+
+                    return __tp_isSegmentURL(lowerURL)
+                        ? __tp_measureResponse(__tp_passthrough)
+                        : __tp_passthrough;
 
                 }
 
@@ -9943,6 +16509,9 @@ dashboardButton.style.visibility =
                 }
 
 
+                __tp_lastChannel = channel;
+
+
                 var enabled =
                     (
                         __tp_config &&
@@ -9953,7 +16522,7 @@ dashboardButton.style.visibility =
                     ?
                     __tp_config.proxies.filter(
                         function(proxy){
-                            return proxy.enabled;
+                            return proxy.enabled && !proxy.quarantine;
                         }
                     )
                     :
@@ -10027,10 +16596,6 @@ dashboardButton.style.visibility =
 
 
                 var winnerResponse =
-                    null;
-
-
-                var winnerProxy =
                     null;
 
 
@@ -10112,10 +16677,6 @@ dashboardButton.style.visibility =
 
                                             winnerResponse =
                                                 response;
-
-                                            winnerProxy =
-                                                proxy;
-
 
                                             var elapsed =
                                                 Math.round(
@@ -10527,8 +17088,16 @@ dashboardButton.style.visibility =
             return;
         }
 
+        // Les relais en quarantaine ne participent pas à la salve
+        // normale ; ils sont simplement re-sondés une fois par heure
+        // pour pouvoir en sortir tout seuls.
         var enabled = pageConfig.proxies.filter(function (p) {
-            return p.enabled;
+
+            return (
+                p.enabled &&
+                (!isQuarantined(p) || isQuarantineProbeDue(p))
+            );
+
         });
 
         if (!enabled.length) {
@@ -10541,29 +17110,11 @@ dashboardButton.style.visibility =
 
             console.log('[TwitchProxy] ===== AUTO-TEST DÉMARRAGE =====');
 
-            for (var i = 0; i < enabled.length; i++) {
-
-                var proxy = enabled[i];
-
-                var result = await testProxy(proxy, channel);
-
-                proxy.lastTest = {
-                    ok: result.ok,
-                    status: result.ok ? 'OK' : result.status,
-                    latency: result.latency,
-                    timestamp: Date.now(),
-                    channel: channel
-                };
-
-                recordProxyTest(
-                    proxy.id,
-                    result.ok,
-                    result.latency
-                );
-
-            }
+            await runProxyTestRound(enabled, channel, false);
 
             autoSortProxies();
+
+            renderDashboard();
 
             console.log('[TwitchProxy] ===== AUTO-TEST TERMINÉ =====');
 
@@ -10661,6 +17212,8 @@ dashboardButton.style.visibility =
             lockDashboardTabIdentity();
 
             showStatsDashboard();
+
+            startAutoBackup();
 
             return;
 
@@ -10814,9 +17367,10 @@ dashboardButton.style.visibility =
         );
 
 
-        // Stats dashboard : bande passante / temps de visionnage
-        // (estimation).
+        // Mesure bande passante / temps de visionnage.
         setInterval(trackBandwidthAndWatchTime, BANDWIDTH_TICK_MS);
+
+        startAutoBackup();
 
     }
 
