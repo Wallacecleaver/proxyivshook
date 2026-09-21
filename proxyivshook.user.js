@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         Twitch HLS Proxy
 // @namespace    twitch-proxy-ivs
-// @version      1.5.3
+// @version      1.6.0
 // @author       razeNFR
 // @description  Twitch HLS via plusieurs proxys - Dashboard statistiques (nouvel onglet, design amélioré) + fallback automatique + résultats persistants + proxys personnalisés
 // @match        https://www.twitch.tv/*
 // @run-at       document-start
 // @grant        none
+// @require      https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js
 // @updateURL    https://raw.githubusercontent.com/razeNFR/proxyivshook/main/proxyivshook.user.js
 // @downloadURL  https://raw.githubusercontent.com/razeNFR/proxyivshook/main/proxyivshook.user.js
 // ==/UserScript==
@@ -32,7 +33,7 @@
         Math.random().toString(36).substring(2, 9);
 
     // Doit être tenu à jour avec le @version de l'en-tête du script.
-    var CURRENT_VERSION = '1.5.3';
+    var CURRENT_VERSION = '1.6.0';
 
     // Même URL que @updateURL : contient toujours la dernière version
     // publiée. On la relit nous-même (plutôt que de compter sur le
@@ -307,6 +308,37 @@
     // défauts, champs validés) à partir d'un objet arbitraire —
     // utilisé à la fois pour charger depuis localStorage et pour
     // l'import d'un fichier JSON exporté.
+    // ------------------------------------------------------------
+    // RETOUR ARRIÈRE (DVR)
+    // ------------------------------------------------------------
+    //
+    // Les crans du curseur de profondeur. Une plage libre de 30 s
+    // à 30 min n'aurait aucun intérêt : personne ne règle un
+    // buffer à 7 min 20. Des crans donnent en prime une étiquette
+    // lisible et une estimation mémoire stable.
+    var DVR_BUFFER_STEPS = [
+        30, 60, 120, 180, 300, 600, 900, 1200, 1800
+    ];
+
+    var DEFAULT_DVR_BUFFER_SECONDS = 180;
+
+    // Débit de repli quand rien n'a encore été mesuré : le
+    // 1080p60 de Twitch tourne autour de 6,2 Mbps (relevé sur un
+    // master playlist réel), soit ~775 Ko/s.
+    var DVR_FALLBACK_BYTES_PER_SECOND = 775000;
+
+
+    function dvrBufferLabel(seconds) {
+
+        if (seconds < 60) {
+            return seconds + ' s';
+        }
+
+        return (seconds / 60) + ' min';
+
+    }
+
+
     function buildConfigFromParsed(parsed) {
 
         var config = {
@@ -317,7 +349,9 @@
             timeout: DEFAULT_TIMEOUT,
             cacheDelay: DEFAULT_CACHE_DELAY,
             keepQualityInBackground: true,
-            autoBackupStats: true
+            autoBackupStats: true,
+            dvrChannels: {},
+            dvrBufferSeconds: DEFAULT_DVR_BUFFER_SECONDS
         };
 
         if (!parsed || typeof parsed !== 'object') {
@@ -527,6 +561,46 @@
 
             config.autoBackupStats =
                 parsed.autoBackupStats;
+
+        }
+
+        // Une chaine absente de la table n'enregistre rien : le
+        // buffer coute de la memoire, il ne s'arme que la ou on
+        // l'a demande.
+        if (
+            parsed.dvrChannels &&
+            typeof parsed.dvrChannels === 'object'
+        ) {
+
+            Object.keys(
+                parsed.dvrChannels
+            ).forEach(
+                function (channel) {
+
+                    if (parsed.dvrChannels[channel]) {
+
+                        config.dvrChannels[channel] = true;
+
+                    }
+
+                }
+            );
+
+        }
+
+        // La profondeur n'est pas libre : elle doit tomber sur un
+        // cran connu, sinon le curseur des reglages n'aurait aucune
+        // position a afficher.
+        if (
+            typeof parsed.dvrBufferSeconds ===
+            'number' &&
+            DVR_BUFFER_STEPS.indexOf(
+                parsed.dvrBufferSeconds
+            ) >= 0
+        ) {
+
+            config.dvrBufferSeconds =
+                parsed.dvrBufferSeconds;
 
         }
 
@@ -763,7 +837,13 @@
                     pageConfig.keepQualityInBackground,
 
                 autoBackupStats:
-                    pageConfig.autoBackupStats
+                    pageConfig.autoBackupStats,
+
+                dvrChannels:
+                    pageConfig.dvrChannels,
+
+                dvrBufferSeconds:
+                    pageConfig.dvrBufferSeconds
 
             };
 
@@ -3947,6 +4027,49 @@
 
                     }
 
+                    // Segments gardes par le Worker pour le
+                    // retour arriere. Filtre sur TAB_ID : les
+                    // autres onglets recoivent le message et ne
+                    // doivent surtout pas melanger leurs
+                    // segments aux notres.
+                    if (
+                        event.data &&
+                        event.data.type === 'dvrSegment' &&
+                        event.data.tabId === TAB_ID
+                    ) {
+
+                        recordDvrSegment(event.data);
+
+                    }
+
+                    // Expiration décidée par le Worker. Elle ne
+                    // vient plus seulement de la capture : fermer
+                    // le lecteur ou changer la profondeur en
+                    // déclenche une aussi, et les ignorer laissait
+                    // la page avec des URL de Blob révoquées.
+                    if (
+                        event.data &&
+                        event.data.type === 'dvrDrop' &&
+                        event.data.tabId === TAB_ID
+                    ) {
+
+                        dropDvrSegments(event.data);
+
+                    }
+
+                    if (
+                        event.data &&
+                        event.data.type === 'dvrUnsupported' &&
+                        event.data.tabId === TAB_ID
+                    ) {
+
+                        dvrUnsupportedChannel =
+                            event.data.channel;
+
+                        dvrResetSegments();
+
+                    }
+
                     if (
                         event.data &&
                         event.data.type === 'log'
@@ -4128,6 +4251,28 @@
             <span class="tp9-switch-track"></span>
         </span>
     </label>
+
+    <label class="tp9-toggle-row tp9-dvr-row"
+        data-tp9-tip="Retour arrière"
+        data-tp9-tip-sub="Garde les dernières minutes de CETTE chaîne en mémoire pour pouvoir les rejouer. Ça coûte de la RAM, donc ça ne s'arme que là où tu le demandes. Le VOD, lui, reste utilisable sans rien armer quand le streamer en enregistre un.">
+        <span class="tp9-toggle-label">
+            <span class="tp9-toggle-icon">⏪</span>
+            <span class="tp9-dvr-label">Retour arrière</span>
+        </span>
+        <span class="tp9-switch">
+            <input type="checkbox" class="tp9-dvr">
+            <span class="tp9-switch-track"></span>
+        </span>
+    </label>
+
+    <div class="tp9-dvr-depth">
+        <div class="tp9-dvr-depth-head">
+            <span class="tp9-dvr-depth-title">Profondeur gardée en mémoire</span>
+            <span class="tp9-dvr-depth-value">3 min</span>
+        </div>
+        <input type="range" class="tp9-dvr-range" min="0" max="8" step="1" value="3">
+        <div class="tp9-dvr-depth-hint"></div>
+    </div>
 
 </div>
 
@@ -4366,6 +4511,67 @@ document.addEventListener(
             );
 
         dashboard
+            .querySelector('.tp9-dvr')
+            .addEventListener(
+                'change',
+                function (event) {
+
+                    setDvrChannelArmed(
+                        getTestChannel(),
+                        event.target.checked
+                    );
+
+                    renderDashboardSettings();
+
+                }
+            );
+
+
+        // L'estimation suit le curseur pendant qu'on le tire,
+        // mais on n'enregistre qu'au relâchement : sinon on
+        // écrirait la config à chaque pixel parcouru.
+        dashboard
+            .querySelector('.tp9-dvr-range')
+            .addEventListener(
+                'input',
+                function (event) {
+
+                    updateDvrDepthLabels(
+                        DVR_BUFFER_STEPS[
+                            parseInt(event.target.value, 10)
+                        ] ||
+                        DEFAULT_DVR_BUFFER_SECONDS
+                    );
+
+                }
+            );
+
+
+        dashboard
+            .querySelector('.tp9-dvr-range')
+            .addEventListener(
+                'change',
+                function (event) {
+
+                    pageConfig.dvrBufferSeconds =
+                        DVR_BUFFER_STEPS[
+                            parseInt(event.target.value, 10)
+                        ] ||
+                        DEFAULT_DVR_BUFFER_SECONDS;
+
+                    saveConfig(pageConfig);
+
+                    broadcastConfig();
+
+                    updateDvrDepthLabels(
+                        pageConfig.dvrBufferSeconds
+                    );
+
+                }
+            );
+
+
+        dashboard
             .querySelector('.tp9-cache-select')
             .addEventListener(
                 'change',
@@ -4462,7 +4668,13 @@ document.addEventListener(
                             true,
 
                         autoBackupStats:
-                            true
+                            true,
+
+                        dvrChannels:
+                            {},
+
+                        dvrBufferSeconds:
+                            DEFAULT_DVR_BUFFER_SECONDS
 
                     };
 
@@ -5445,6 +5657,79 @@ document.addEventListener(
         updateBackupUI();
 
 
+        // L'interrupteur porte le nom de la chaîne : il ne vaut
+        // que pour elle, et c'est la seule façon de le dire sans
+        // une ligne d'explication de plus.
+        var dvrChannel = getTestChannel();
+
+        var dvrToggle =
+            dashboard.querySelector('.tp9-dvr');
+
+        if (dvrToggle) {
+
+            dvrToggle.checked =
+                isDvrChannelArmed(dvrChannel);
+
+            dvrToggle.disabled = !dvrChannel;
+
+        }
+
+        var dvrLabel =
+            dashboard.querySelector('.tp9-dvr-label');
+
+        if (dvrLabel) {
+
+            dvrLabel.textContent =
+                dvrChannel
+                    ? 'Retour arrière · ' + dvrChannel
+                    : 'Retour arrière';
+
+        }
+
+        var dvrRange =
+            dashboard.querySelector('.tp9-dvr-range');
+
+        if (dvrRange) {
+
+            var dvrIndex =
+                DVR_BUFFER_STEPS.indexOf(
+                    pageConfig.dvrBufferSeconds
+                );
+
+            if (dvrIndex < 0) {
+
+                dvrIndex =
+                    DVR_BUFFER_STEPS.indexOf(
+                        DEFAULT_DVR_BUFFER_SECONDS
+                    );
+
+            }
+
+            dvrRange.max =
+                String(DVR_BUFFER_STEPS.length - 1);
+
+            dvrRange.value = String(dvrIndex);
+
+        }
+
+        var dvrDepth =
+            dashboard.querySelector('.tp9-dvr-depth');
+
+        if (dvrDepth) {
+
+            dvrDepth.classList.toggle(
+                'tp9-dvr-depth-idle',
+                !isDvrChannelArmed(dvrChannel)
+            );
+
+        }
+
+        updateDvrDepthLabels(
+            pageConfig.dvrBufferSeconds ||
+            DEFAULT_DVR_BUFFER_SECONDS
+        );
+
+
         dashboard
             .querySelector(
                 '.tp9-timeout-select'
@@ -6200,11 +6485,18 @@ function showAddProxyForm() {
 
         var tip = ensureTooltip();
 
-        // Replacé en dernier dans <body> : garantit qu'il passe
+        // Replacé en dernier dans son hôte : garantit qu'il passe
         // au-dessus du dashboard plein écran, qui peut avoir été
         // créé après lui et partage le même z-index.
-        if (document.body.lastChild !== tip) {
-            document.body.appendChild(tip);
+        //
+        // L'hôte n'est pas toujours <body> : en plein écran, le
+        // navigateur ne dessine que le sous-arbre de l'élément
+        // concerné, et une bulle restée dans <body> y serait donc
+        // invisible — c'est le cas de la barre de retour arrière.
+        var tipHost = document.fullscreenElement || document.body;
+
+        if (tipHost.lastChild !== tip) {
+            tipHost.appendChild(tip);
         }
 
         tooltipTarget = el;
@@ -6456,6 +6748,4457 @@ function showAddProxyForm() {
                 /'/g,
                 '&#039;'
             );
+
+    }
+
+
+    var DVR_CSS = `
+
+        /* =====================================================
+           BOUTON RETOUR ARRIÈRE
+        ===================================================== */
+
+        /* Ce bouton se tient dans la barre d'actions de la chaîne,
+           entre le bouclier du menu et le cœur : il doit donc avoir
+           exactement la façon des boutons de Twitch — pastille
+           arrondie, même fond translucide, même hauteur. Le carré
+           noir à angles droits de la version précédente jurait au
+           milieu d'eux.
+
+           Les valeurs sont celles de #tp9-player-button, recopiées
+           volontairement : les deux boutons doivent rester
+           indiscernables l'un de l'autre. */
+
+        #tp9-dvr-button {
+
+            z-index: 2147483646;
+
+            width: auto;
+            height: 32px;
+
+            min-width: 32px;
+
+            padding: 0 12px;
+            margin: 0;
+
+            display: inline-flex;
+
+            align-items: center;
+            justify-content: center;
+
+            box-sizing: border-box;
+
+            border: 0;
+
+            border-radius: 9000px;
+
+            background-color: rgba(83, 83, 95, .48);
+
+            color: #efeff1;
+
+            line-height: 1;
+
+            cursor: pointer;
+
+            appearance: none;
+            -webkit-appearance: none;
+
+            outline: none;
+
+            transition:
+                background-color .12s ease,
+                color .12s ease,
+                opacity .15s ease,
+                transform .12s ease;
+
+        }
+
+        #tp9-dvr-button svg {
+
+            display: block;
+
+        }
+
+        #tp9-dvr-button:hover {
+
+            background-color: rgba(83, 83, 95, .7);
+
+            color: #fff;
+
+            transform: translateY(-1px);
+
+        }
+
+        #tp9-dvr-button:active {
+
+            background-color: rgba(0, 0, 0, .85);
+
+            transform: scale(.97);
+
+        }
+
+        #tp9-dvr-button:focus-visible {
+
+            outline: 2px solid #fff;
+
+            outline-offset: 2px;
+
+        }
+
+        /* Rien à rejouer : il garde sa place mais cesse de réagir,
+           comme les commandes sans objet de la barre. */
+
+        #tp9-dvr-button.tp9-dvr-off {
+
+            opacity: .38;
+
+            cursor: default;
+
+        }
+
+        #tp9-dvr-button.tp9-dvr-off:hover,
+        #tp9-dvr-button.tp9-dvr-off:active {
+
+            background-color: rgba(83, 83, 95, .48);
+
+            transform: none;
+
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+
+            #tp9-dvr-button:hover,
+            #tp9-dvr-button:active {
+
+                transform: none;
+
+            }
+
+        }
+
+
+        /* =====================================================
+           LECTEUR DE RETOUR ARRIÈRE
+        ===================================================== */
+
+        .tp9dvr {
+
+            z-index: 2147483645;
+
+            background: #000;
+
+            overflow: hidden;
+
+            display: flex;
+
+            align-items: flex-end;
+
+            font-family: Inter, Roobert, "Helvetica Neue", Arial, sans-serif;
+
+        }
+
+        .tp9dvr-video {
+
+            position: absolute;
+
+            inset: 0;
+
+            width: 100%;
+
+            height: 100%;
+
+            object-fit: contain;
+
+            background: #000;
+
+        }
+
+        .tp9dvr-status {
+
+            position: absolute;
+
+            inset: 0;
+
+            display: none;
+
+            align-items: center;
+
+            justify-content: center;
+
+            padding: 0 24px;
+
+            color: rgba(255,255,255,.82);
+
+            font-size: 13px;
+
+            text-align: center;
+
+            pointer-events: none;
+
+        }
+
+
+        /* La barre reste visible en permanence : ce mode est
+           temporaire, masquer les commandes ferait perdre le
+           bouton de retour au direct. */
+
+        .tp9dvr-bar {
+
+            position: relative;
+
+            z-index: 2;
+
+            width: 100%;
+
+            box-sizing: border-box;
+
+            display: flex;
+
+            align-items: center;
+
+            gap: 8px;
+
+            padding: 26px 12px 10px;
+
+            background: linear-gradient(
+                to top,
+                rgba(0,0,0,.88),
+                rgba(0,0,0,0)
+            );
+
+        }
+
+        .tp9dvr-btn {
+
+            flex: none;
+
+            width: 28px;
+
+            height: 28px;
+
+            padding: 0;
+
+            display: inline-flex;
+
+            align-items: center;
+
+            justify-content: center;
+
+            border: none;
+
+            border-radius: 5px;
+
+            background: transparent;
+
+            color: #fff;
+
+            font-size: 14px;
+
+            line-height: 1;
+
+            cursor: pointer;
+
+            transition: background .15s ease;
+
+        }
+
+        .tp9dvr-btn:hover {
+
+            background: rgba(255,255,255,.16);
+
+        }
+
+        .tp9dvr-time {
+
+            flex: none;
+
+            min-width: 52px;
+
+            color: #fff;
+
+            font-size: 12px;
+
+            font-variant-numeric: tabular-nums;
+
+            text-align: center;
+
+        }
+
+        .tp9dvr-seek {
+
+            flex: 1 1 auto;
+
+            min-width: 60px;
+
+        }
+
+        .tp9dvr-vol {
+
+            flex: none;
+
+            width: 68px;
+
+        }
+
+        .tp9dvr input[type="range"] {
+
+            -webkit-appearance: none;
+
+            appearance: none;
+
+            height: 4px;
+
+            border-radius: 2px;
+
+            background: rgba(255,255,255,.28);
+
+            cursor: pointer;
+
+        }
+
+        .tp9dvr input[type="range"]::-webkit-slider-thumb {
+
+            -webkit-appearance: none;
+
+            appearance: none;
+
+            width: 12px;
+
+            height: 12px;
+
+            border: none;
+
+            border-radius: 50%;
+
+            background: #9147ff;
+
+        }
+
+        .tp9dvr input[type="range"]::-moz-range-thumb {
+
+            width: 12px;
+
+            height: 12px;
+
+            border: none;
+
+            border-radius: 50%;
+
+            background: #9147ff;
+
+        }
+
+        /* Dire d'où sort l'image évite la question « pourquoi je ne
+           peux pas remonter plus loin ». */
+
+        .tp9dvr-source {
+
+            flex: none;
+
+            padding: 2px 7px;
+
+            border-radius: 4px;
+
+            background: rgba(145,71,255,.24);
+
+            color: #d3bdff;
+
+            font-size: 10px;
+
+            font-weight: 700;
+
+            letter-spacing: .04em;
+
+            text-transform: uppercase;
+
+            white-space: nowrap;
+
+        }
+
+        .tp9dvr-live {
+
+            flex: none;
+
+            padding: 6px 11px;
+
+            border: none;
+
+            border-radius: 5px;
+
+            background: rgba(255,255,255,.14);
+
+            color: #fff;
+
+            font-size: 11px;
+
+            font-weight: 700;
+
+            white-space: nowrap;
+
+            cursor: pointer;
+
+            transition: background .15s ease;
+
+        }
+
+        .tp9dvr-live:hover {
+
+            background: #eb0400;
+
+        }
+
+
+        /* =====================================================
+           RÉGLAGES : PROFONDEUR DU BUFFER
+        ===================================================== */
+
+        .tp9-dvr-depth {
+
+            margin-top: 8px;
+
+            padding: 10px 12px;
+
+            border-radius: 8px;
+
+            background: rgba(255,255,255,.04);
+
+        }
+
+        .tp9-dvr-depth-head {
+
+            display: flex;
+
+            align-items: baseline;
+
+            justify-content: space-between;
+
+            gap: 8px;
+
+            margin-bottom: 8px;
+
+        }
+
+        .tp9-dvr-depth-title {
+
+            color: rgba(255,255,255,.72);
+
+            font-size: 11px;
+
+        }
+
+        .tp9-dvr-depth-value {
+
+            color: #fff;
+
+            font-size: 12px;
+
+            font-weight: 700;
+
+            font-variant-numeric: tabular-nums;
+
+        }
+
+        .tp9-dvr-range {
+
+            -webkit-appearance: none;
+
+            appearance: none;
+
+            width: 100%;
+
+            height: 4px;
+
+            border-radius: 2px;
+
+            background: rgba(255,255,255,.18);
+
+            cursor: pointer;
+
+        }
+
+        .tp9-dvr-range::-webkit-slider-thumb {
+
+            -webkit-appearance: none;
+
+            appearance: none;
+
+            width: 13px;
+
+            height: 13px;
+
+            border: none;
+
+            border-radius: 50%;
+
+            background: #9147ff;
+
+        }
+
+        .tp9-dvr-range::-moz-range-thumb {
+
+            width: 13px;
+
+            height: 13px;
+
+            border: none;
+
+            border-radius: 50%;
+
+            background: #9147ff;
+
+        }
+
+        .tp9-dvr-depth-hint {
+
+            margin-top: 7px;
+
+            color: rgba(255,255,255,.45);
+
+            font-size: 10px;
+
+        }
+
+        /* Sans chaîne armée, le curseur ne pilote rien : il doit le
+           montrer plutôt que de laisser croire à un réglage actif. */
+
+        .tp9-dvr-depth.tp9-dvr-depth-idle {
+
+            opacity: .5;
+
+        }
+
+
+        /* =====================================================
+           MODE DIRECT
+           -----------------------------------------------------
+           La barre est posée sur le lecteur Twitch, qui joue
+           toujours : la surface laisse donc passer les clics,
+           le stream reste cliquable normalement.
+
+           Seule la barre capte la souris, et elle se cale au
+           RAS DU BAS du lecteur — exactement là où Twitch met
+           la sienne. Les deux ne peuvent pas cohabiter : la
+           décaler vers le haut la faisait flotter au milieu
+           de l'image. La nôtre passe donc devant, et son fond
+           est assez opaque pour que celle de Twitch ne
+           transparaisse pas quand le survol la rappelle
+           dessous.
+        ===================================================== */
+
+        .tp9dvr-live-mode {
+
+            background: transparent;
+
+            pointer-events: none;
+
+        }
+
+        .tp9dvr-live-mode .tp9dvr-video {
+
+            display: none;
+
+        }
+
+        .tp9dvr-live-mode .tp9dvr-bar {
+
+            pointer-events: auto;
+
+            margin-bottom: 0;
+
+            background: linear-gradient(
+                to top,
+                rgba(0,0,0,.97) 0%,
+                rgba(0,0,0,.93) 55%,
+                rgba(0,0,0,0) 100%
+            );
+
+        }
+
+
+        /* Une commande sans objet sur le direct (pause, avance,
+           retour au direct alors qu'on y est déjà) : elle reste
+           à sa place, elle cesse juste de faire semblant. */
+
+        .tp9dvr-btn:disabled,
+        .tp9dvr-live:disabled {
+
+            opacity: .3;
+
+            cursor: default;
+
+        }
+
+        .tp9dvr-btn:disabled:hover,
+        .tp9dvr-live:disabled:hover {
+
+            background: transparent;
+
+        }
+
+        .tp9dvr-live:disabled:hover {
+
+            background: rgba(255,255,255,.14);
+
+        }
+
+
+        /* La pastille de source passe au rouge sur le direct :
+           c'est la couleur que Twitch lui donne partout. */
+
+        .tp9dvr-source-live {
+
+            background: rgba(235,4,0,.26);
+
+            color: #ff9b98;
+
+        }
+
+
+        .tp9dvr-close:hover {
+
+            background: rgba(235,4,0,.55);
+
+        }
+
+
+        /* =====================================================
+           VOLUME À LA MOLETTE
+           -----------------------------------------------------
+           Le curseur de volume fait 68 px : à la molette, par
+           pas de 1 %, il ne bouge presque pas. C'est le chiffre
+           qui dit où on en est.
+        ===================================================== */
+
+        .tp9dvr-vol-hint {
+
+            position: absolute;
+
+            left: 50%;
+
+            top: 50%;
+
+            transform: translate(-50%, -50%) scale(.94);
+
+            padding: 9px 16px;
+
+            border-radius: 10px;
+
+            background: rgba(0,0,0,.72);
+
+            color: #fff;
+
+            font-size: 15px;
+
+            font-weight: 700;
+
+            font-variant-numeric: tabular-nums;
+
+            white-space: nowrap;
+
+            pointer-events: none;
+
+            opacity: 0;
+
+            transition: opacity .12s ease, transform .12s ease;
+
+        }
+
+        .tp9dvr-vol-hint.tp9dvr-vol-hint-on {
+
+            opacity: 1;
+
+            transform: translate(-50%, -50%) scale(1);
+
+        }
+
+
+        @media (prefers-reduced-motion: reduce) {
+
+            .tp9dvr-vol-hint {
+
+                transition: none;
+
+            }
+
+        }
+
+
+        /* =====================================================
+           LA BARRE S'EFFACE QUAND LA SOURIS S'EN VA
+           -----------------------------------------------------
+           Elle restait affichée en permanence, posée par-dessus
+           l'image. Elle suit maintenant la même règle que celle
+           de Twitch : visible tant que le curseur est sur le
+           lecteur, effacée quelques secondes après qu'il en soit
+           sorti.
+
+           « pointer-events: none » une fois effacée, sinon elle
+           continuerait d'intercepter les clics destinés aux
+           commandes de Twitch en mode direct.
+        ===================================================== */
+
+        .tp9dvr-bar {
+
+            transition:
+                opacity .18s ease,
+                transform .18s ease;
+
+        }
+
+        /* Trois classes plutôt que deux : « .tp9dvr-live-mode
+           .tp9dvr-bar » rétablit « pointer-events: auto » et
+           l'emporterait sur une règle à une seule classe. */
+
+        .tp9dvr .tp9dvr-bar.tp9dvr-bar-hidden {
+
+            opacity: 0;
+
+            transform: translateY(10px);
+
+            pointer-events: none;
+
+        }
+
+
+        /* =====================================================
+           CURSEUR DE POSITION : UNE VRAIE ZONE DE PRISE
+           -----------------------------------------------------
+           Le trait fait 4 px de haut : il fallait viser au pixel
+           près pour l'attraper. L'élément monte donc à 18 px —
+           c'est lui qui reçoit la souris — tandis que le trait
+           VISIBLE passe sur la piste (::-*-track) et garde sa
+           finesse. Rien ne change à l'œil, tout change à la main.
+
+           Sélecteurs en « input.tp9dvr-seek » et non en
+           « .tp9dvr-seek » seul : les règles génériques plus
+           haut sont écrites en « .tp9dvr input[type=range] »,
+           donc plus spécifiques
+           qu'une classe isolée.
+        ===================================================== */
+
+        .tp9dvr input.tp9dvr-seek {
+
+            height: 18px;
+
+            border-radius: 0;
+
+            background: transparent;
+
+        }
+
+        .tp9dvr input.tp9dvr-seek::-webkit-slider-runnable-track {
+
+            height: 4px;
+
+            border-radius: 2px;
+
+            background: rgba(255,255,255,.28);
+
+        }
+
+        .tp9dvr input.tp9dvr-seek::-moz-range-track {
+
+            height: 4px;
+
+            border-radius: 2px;
+
+            background: rgba(255,255,255,.28);
+
+        }
+
+        /* Webkit ne recentre pas la pastille quand la piste est
+           plus fine que l'élément : -5px = (14 - 4) / 2. */
+
+        .tp9dvr input.tp9dvr-seek::-webkit-slider-thumb {
+
+            width: 14px;
+
+            height: 14px;
+
+            margin-top: -5px;
+
+        }
+
+        .tp9dvr input.tp9dvr-seek::-moz-range-thumb {
+
+            width: 14px;
+
+            height: 14px;
+
+        }
+
+
+        @media (prefers-reduced-motion: reduce) {
+
+            /* Le fondu reste : c'est de l'opacité, pas du
+               mouvement. Seul le glissement part. */
+
+            .tp9dvr-bar {
+
+                transition: opacity .18s ease;
+
+            }
+
+            .tp9dvr .tp9dvr-bar.tp9dvr-bar-hidden {
+
+                transform: none;
+
+            }
+
+        }
+
+
+        /* =====================================================
+           PICTOGRAMMES
+           -----------------------------------------------------
+           Les emoji étaient dessinés par la police du système :
+           ni la même taille, ni la même couleur, ni le même
+           alignement que les commandes de Twitch juste en
+           dessous. Des tracés vectoriels prennent leur place,
+           tous à la couleur du texte.
+        ===================================================== */
+
+        .tp9dvr-btn svg,
+        .tp9dvr-live svg {
+
+            display: block;
+
+        }
+
+        /* Le rouge de Twitch, et une pastille plutôt qu'un emoji
+           🔴 : elle garde sa taille quelle que soit la police. */
+
+        .tp9dvr-live {
+
+            display: inline-flex;
+
+            align-items: center;
+
+            gap: 7px;
+
+        }
+
+        .tp9dvr-live-dot {
+
+            width: 8px;
+
+            height: 8px;
+
+            border-radius: 50%;
+
+            background: #eb0400;
+
+        }
+
+        .tp9dvr-vol-hint {
+
+            display: flex;
+
+            align-items: center;
+
+            gap: 9px;
+
+        }
+
+    `;
+
+
+    // ============================================================
+    // RETOUR ARRIÈRE (DVR)
+    // ============================================================
+    //
+    // Un seul lecteur, deux sources :
+    //
+    //   mémoire — les segments que le Worker garde pour CETTE
+    //             chaîne, quand elle a été armée dans le menu.
+    //             Marche partout, profondeur = ce qui a été
+    //             enregistré depuis qu'on l'a armée.
+    //
+    //   VOD     — l'enregistrement que Twitch fabrique en parallèle
+    //             du live, quand le streamer l'a activé. Profondeur
+    //             = tout le stream, zéro mémoire, mais une
+    //             quinzaine de secondes de retard : il n'a pas
+    //             encore la toute fin.
+    //
+    // La source la plus proche du direct gagne. Le VOD ne remplace
+    // donc jamais la mémoire, il prolonge ce qu'elle ne couvre pas.
+
+
+    var dvrSegments = [];
+    var dvrSegmentsChannel = null;
+    var dvrSegmentsSpan = 0;
+
+    // Heure murale du segment le plus récent reçu. La mémoire ne
+    // s'arrête plus forcément au direct : mettre le lecteur Twitch
+    // en pause gèle aussi ce qu'elle enregistre, et sans cette date
+    // on rejouait un décalage de toute la durée de la pause.
+    var dvrSegmentsEndWall = 0;
+
+    var dvrOverlay = null;
+    var dvrVideo = null;
+    var dvrHls = null;
+    var dvrButton = null;
+
+    var dvrChannelInUse = null;
+    var dvrSourceKind = null;
+
+    // Heure murale correspondant à l'instant 0 de la source en
+    // cours. C'est la seule chose à connaître pour convertir une
+    // position de lecture en « il y a X secondes », et elle rend les
+    // deux sources interchangeables.
+    var dvrSourceStartWall = 0;
+
+    var dvrPlaylistUrl = null;
+    var dvrLiveVideo = null;
+    var dvrTicker = null;
+    var dvrScrubbing = false;
+    var dvrSwitching = false;
+
+    // Instant du gel quand on met le DIRECT en pause, 0 sinon.
+    // C'est lui qui dit où reprendre : la reprise ne repart pas au
+    // direct, elle repart de là.
+    var dvrLivePauseAt = 0;
+
+    // Pause demandée pour une source encore en cours de chargement :
+    // hls.js ne sait pas démarrer figé, il faut attendre le manifest.
+    var dvrPendingPause = false;
+
+    // Niveau choisi (jamais 0 : couper le son est une coupure, pas
+    // un niveau) et coupure. Voir dvrPushVolume. La valeur de
+    // départ ne sert que si le lecteur Twitch est déjà à zéro à
+    // l'ouverture : rétablir le son enverrait sinon du 100 %.
+    var dvrVolumeLevel = 0.5;
+    var dvrVolumeMuted = false;
+
+    // Fenêtre pendant laquelle la barre reste affichée quoi qu'en
+    // dise celle de Twitch (réglage du volume à la molette).
+    var dvrBarForcedUntil = 0;
+
+    // Délai avant que la barre ne s'efface, une fois la souris
+    // sortie du lecteur. Twitch prend 3 s sur la sienne ; un peu
+    // moins ici, la nôtre est posée PAR-DESSUS l'image.
+    var DVR_BAR_HIDE_MS = 2500;
+
+    var dvrBarTimer = null;
+    var dvrBarHovered = false;
+    var dvrPointerWatcher = null;
+
+    // Renseigne avec la chaîne dont le flux ne peut pas être
+    // rejoué depuis la mémoire (fMP4). Stocker la chaîne plutôt
+    // qu'un booléen évite d'avoir à penser à le remettre à zéro.
+    var dvrUnsupportedChannel = null;
+
+    var dvrVodCache = {};
+    var dvrVodInFlight = {};
+
+    // Durée de vie du seul fait qui bouge : « cette chaîne a-t-elle
+    // un enregistrement en cours ». L'ACCÈS à cet enregistrement,
+    // lui, est mis en cache par VOD et sans péremption.
+    var DVR_VOD_TTL_MS = 120000;
+
+    // Le VOD traîne derrière le direct. Mesuré autour de 15 s sur un
+    // vrai live ; on prend une marge pour ne jamais demander un
+    // segment qui n'existe pas encore.
+    var DVR_VOD_LAG_SECONDS = 25;
+
+
+    function dvrHlsLib() {
+
+        try {
+
+            if (
+                typeof Hls !== 'undefined' &&
+                Hls
+            ) {
+                return Hls;
+            }
+
+        } catch (e) {}
+
+        return window.Hls || null;
+
+    }
+
+
+    function dvrSupported() {
+
+        var lib = dvrHlsLib();
+
+        return !!(
+            lib &&
+            lib.isSupported &&
+            lib.isSupported()
+        );
+
+    }
+
+
+    // ------------------------------------------------------------
+    // Armement par chaîne
+    // ------------------------------------------------------------
+    //
+    // Le buffer coûte de la mémoire en permanence : il ne s'arme que
+    // là où on l'a demandé, jamais sur tout ce qu'on regarde.
+
+    function isDvrChannelArmed(channel) {
+
+        return !!(
+            channel &&
+            pageConfig.dvrChannels &&
+            pageConfig.dvrChannels[channel]
+        );
+
+    }
+
+
+    function setDvrChannelArmed(channel, armed) {
+
+        if (!channel) {
+            return;
+        }
+
+        if (!pageConfig.dvrChannels) {
+            pageConfig.dvrChannels = {};
+        }
+
+        if (armed) {
+
+            pageConfig.dvrChannels[channel] = true;
+
+        } else {
+
+            delete pageConfig.dvrChannels[channel];
+
+            if (dvrSegmentsChannel === channel) {
+
+                dvrResetSegments();
+
+            }
+
+        }
+
+        saveConfig(pageConfig);
+
+        broadcastConfig();
+
+        positionDvrButton();
+
+    }
+
+
+    // Toute la source « mémoire » repose sur des Blob créés DANS
+    // le Worker : rien ne garantit a priori qu'une URL de Blob
+    // fabriquée là soit lisible depuis la page. On le vérifie une
+    // fois, sur le premier segment reçu, au lieu de le découvrir
+    // par un échec de lecture qui ne dirait pas d'où il vient.
+    //
+    //   null      — pas encore su',
+    //   'pending' — vérification en cours
+    //   true      — lisible
+    //   false     — illisible, la mémoire cesse alors de compter
+    var dvrBlobProbe = null;
+
+    // Détail de la dernière erreur fatale de hls.js, repris dans
+    // le message affiché : « Lecture impossible » tout court
+    // ne permet de diagnostiquer quoi que ce soit.
+    var dvrLastErrorDetail = null;
+
+
+    function dvrProbeBlobAccess(url) {
+
+        if (dvrBlobProbe !== null || !url) {
+            return;
+        }
+
+        dvrBlobProbe = 'pending';
+
+        fetch(url)
+            .then(function (response) {
+
+                dvrBlobProbe = !!response.ok;
+
+                if (dvrBlobProbe) {
+
+                    console.log(
+                        '[TwitchProxy][DVR] Mémoire du Worker lisible depuis la page'
+                    );
+
+                    return;
+
+                }
+
+                dvrReportBlobFailure(response.status);
+
+            })
+            .catch(function (error) {
+
+                dvrBlobProbe = false;
+
+                dvrReportBlobFailure(error);
+
+            });
+
+    }
+
+
+    function dvrReportBlobFailure(reason) {
+
+        console.warn(
+            '[TwitchProxy][DVR] Les segments gardés par le Worker ne sont pas lisibles depuis la page :',
+            reason
+        );
+
+        logEvent(
+            'error',
+            'Retour arrière : la mémoire du Worker est inaccessible, seul le VOD reste utilisable'
+        );
+
+        positionDvrButton();
+
+    }
+
+
+    function dvrResetSegments() {
+
+        dvrSegments = [];
+        dvrSegmentsSpan = 0;
+        dvrSegmentsEndWall = 0;
+        dvrSegmentsChannel = null;
+
+    }
+
+
+    // Le Worker n'envoie que l'URL d'un Blob, jamais les octets : un
+    // ArrayBuffer en BroadcastChannel serait recopié dans tous les
+    // onglets twitch.tv ouverts.
+    function recordDvrSegment(data) {
+
+        dvrProbeBlobAccess(data.url);
+
+        if (data.channel !== dvrSegmentsChannel) {
+
+            dvrResetSegments();
+
+            dvrSegmentsChannel = data.channel;
+
+        }
+
+        // Deux segments peuvent arriver dans le désordre : on les
+        // range par numéro, sinon le playlist reconstruit ferait
+        // sauter la lecture.
+        var at = dvrSegments.length;
+
+        while (
+            at > 0 &&
+            dvrSegments[at - 1].seq > data.seq
+        ) {
+            at--;
+        }
+
+        dvrSegments.splice(
+            at,
+            0,
+            {
+                url: data.url,
+                dur: data.duration,
+                seq: data.seq,
+                variant: data.variant || ''
+            }
+        );
+
+        dvrSegmentsSpan += data.duration;
+
+        dvrSegmentsEndWall = Date.now();
+
+        positionDvrButton();
+
+    }
+
+
+    // Le Worker a révoqué ces Blob de son côté : on suit, sinon on
+    // référencerait des URL mortes — et hls.js n'y verrait pas une
+    // erreur réseau mais un fragment illisible (fragParsingError).
+    function dropDvrSegments(data) {
+
+        if (data.clear) {
+
+            dvrResetSegments();
+
+            positionDvrButton();
+
+            return;
+
+        }
+
+        for (var i = 0; i < (data.count || 0); i++) {
+
+            var gone = dvrSegments.shift();
+
+            if (gone) {
+                dvrSegmentsSpan -= gone.dur;
+            }
+
+        }
+
+        if (dvrSegmentsSpan < 0) {
+            dvrSegmentsSpan = 0;
+        }
+
+        positionDvrButton();
+
+    }
+
+
+    // Tant que le lecteur de passé est ouvert, le Worker doit cesser
+    // d'expirer ses segments : révoquer un Blob en cours de lecture
+    // couperait l'image.
+    function dvrSendHold(hold) {
+
+        if (!configChannel) {
+            return;
+        }
+
+        try {
+
+            configChannel.postMessage({
+                type: 'dvrControl',
+                tabId: TAB_ID,
+                hold: !!hold
+            });
+
+        } catch (e) {}
+
+    }
+
+
+    // ------------------------------------------------------------
+    // VOD en cours : existence, accès, et contournement sub-only
+    // ------------------------------------------------------------
+    //
+    // Trois états, tranchés AVANT que le bouton ne s'allume. C'est
+    // tout l'intérêt : un bouton qui propose une source injouable ne
+    // vaut pas mieux qu'un bouton grisé.
+    //
+    //   'open'    — usher rend le manifest, lecture normale.
+    //
+    //   'bypass'  — usher répond 403 (VOD réservé aux abonnés), mais
+    //               le CDN qui héberge l'enregistrement sert ses
+    //               segments SANS jeton, et avec un en-tête CORS qui
+    //               autorise explicitement twitch.tv. On récupère le
+    //               chemin de stockage via l'URL des vignettes de la
+    //               barre de progression, la seule qui le donne.
+    //
+    //   'blocked' — ni l'un ni l'autre : on fait comme s'il n'y avait
+    //               pas de VOD du tout, et la mémoire prend le relais.
+    //
+    // L'accès est mis en cache PAR VOD et sans péremption : c'est une
+    // propriété de l'enregistrement, pas un état passager. Sans ça un
+    // VOD refusé repassait en « disponible » à chaque expiration du
+    // cache, et le lecteur repartait sur une source dont on savait
+    // déjà qu'elle ne marcherait pas.
+
+    var dvrVodAccess = {};
+    var dvrVodAccessPending = {};
+
+    // Renditions tentées pour un accès direct, de la meilleure à la
+    // plus modeste. 'chunked' est la source : elle existe toujours,
+    // les autres ne sont là que pour les vieux enregistrements.
+    var DVR_VOD_RENDITIONS = [
+        'chunked',
+        '720p60',
+        '720p30',
+        '480p30'
+    ];
+
+
+    // Ne renvoie un VOD que s'il est RÉELLEMENT lisible : tout le
+    // reste du module peut donc se contenter de tester sa présence.
+    function dvrVodInfoFor(channel) {
+
+        if (!channel) {
+            return null;
+        }
+
+        var entry = dvrVodCache[channel];
+
+        var fresh =
+            entry &&
+            (Date.now() - entry.at) < DVR_VOD_TTL_MS;
+
+        if (
+            !fresh &&
+            !dvrVodInFlight[channel]
+        ) {
+
+            fetchDvrVodInfo(channel);
+
+        }
+
+        if (!entry || !entry.id) {
+            return null;
+        }
+
+        var access = dvrVodAccess[entry.id];
+
+        if (
+            !access ||
+            !access.url
+        ) {
+            return null;
+        }
+
+        return {
+            id: entry.id,
+            startWall: entry.startWall,
+            url: access.url,
+            state: access.state
+        };
+
+    }
+
+
+    // Vrai tant qu'on ne sait pas encore à quoi s'en tenir : le
+    // bouton peut le dire au lieu d'annoncer une absence de VOD qui
+    // n'est peut-être que de l'attente.
+    function dvrVodPendingFor(channel) {
+
+        if (!channel) {
+            return false;
+        }
+
+        if (dvrVodInFlight[channel]) {
+            return true;
+        }
+
+        var entry = dvrVodCache[channel];
+
+        return !!(
+            entry &&
+            entry.id &&
+            dvrVodAccessPending[entry.id]
+        );
+
+    }
+
+
+    function fetchDvrVodInfo(channel) {
+
+        dvrVodInFlight[channel] = true;
+
+        dvrGql(
+            'query($login:String!){user(login:$login){stream{id createdAt archiveVideo{id}}}}',
+            { login: channel },
+            function (json) {
+
+                var stream =
+                    json &&
+                    json.data &&
+                    json.data.user &&
+                    json.data.user.stream;
+
+                var archive =
+                    stream &&
+                    stream.archiveVideo;
+
+                var startWall =
+                    stream && stream.createdAt
+                        ? Date.parse(stream.createdAt)
+                        : NaN;
+
+                dvrVodCache[channel] = {
+                    at: Date.now(),
+                    id:
+                        (archive && archive.id && !isNaN(startWall))
+                            ? archive.id
+                            : null,
+                    startWall: startWall
+                };
+
+                delete dvrVodInFlight[channel];
+
+                var id = dvrVodCache[channel].id;
+
+                if (
+                    id &&
+                    !dvrVodAccess[id] &&
+                    !dvrVodAccessPending[id]
+                ) {
+
+                    resolveDvrVodAccess(id, channel);
+
+                }
+
+                positionDvrButton();
+
+            },
+            function () {
+
+                // Échec réseau : on retient l'absence pour ne pas
+                // réinterroger en boucle, la péremption relancera.
+                dvrVodCache[channel] = {
+                    at: Date.now(),
+                    id: null,
+                    startWall: NaN
+                };
+
+                delete dvrVodInFlight[channel];
+
+            }
+        );
+
+    }
+
+
+    // Décide une fois pour toutes par quel chemin ce VOD se lit.
+    function resolveDvrVodAccess(id, channel) {
+
+        dvrVodAccessPending[id] = true;
+
+        dvrGql(
+            'query($id:ID!){videoPlaybackAccessToken(id:$id,params:{platform:"web",playerBackend:"mediaplayer",playerType:"site"}){value signature}}',
+            { id: id },
+            function (json) {
+
+                var token =
+                    json &&
+                    json.data &&
+                    json.data.videoPlaybackAccessToken;
+
+                if (
+                    token &&
+                    token.value &&
+                    token.signature &&
+                    dvrTokenIsOpen(token.value)
+                ) {
+
+                    dvrVodAccess[id] = {
+                        state: 'open',
+                        url:
+                            'https://usher.ttvnw.net/vod/' +
+                            encodeURIComponent(id) +
+                            '.m3u8?allow_source=true&allow_audio_only=true&player=twitchweb' +
+                            '&nauth=' +
+                            encodeURIComponent(token.value) +
+                            '&nauthsig=' +
+                            encodeURIComponent(token.signature)
+                    };
+
+                    delete dvrVodAccessPending[id];
+
+                    positionDvrButton();
+
+                    return;
+
+                }
+
+                // Jeton refusé ou bridé : reste le chemin direct.
+                dvrResolveBypass(id, channel);
+
+            },
+            function () {
+
+                dvrResolveBypass(id, channel);
+
+            }
+        );
+
+    }
+
+
+    // Le jeton dit lui-même ce à quoi on n'a pas droit :
+    // `restricted_bitrates` énumère les qualités refusées, et il les
+    // liste TOUTES quand le VOD est réservé aux abonnés.
+    function dvrTokenIsOpen(value) {
+
+        try {
+
+            var parsed = JSON.parse(value);
+
+            if (
+                parsed &&
+                parsed.authorization &&
+                parsed.authorization.forbidden
+            ) {
+                return false;
+            }
+
+            var restricted =
+                parsed &&
+                parsed.chansub &&
+                parsed.chansub.restricted_bitrates;
+
+            return !(restricted && restricted.length);
+
+        } catch (e) {
+
+            return false;
+
+        }
+
+    }
+
+
+    // L'URL des vignettes de la barre de progression est la seule
+    // qui expose le chemin de stockage de l'enregistrement — son
+    // préfixe contient une empreinte aléatoire, impossible à
+    // deviner autrement.
+    function dvrResolveBypass(id, channel) {
+
+        dvrGql(
+            'query($id:ID!){video(id:$id){seekPreviewsURL}}',
+            { id: id },
+            function (json) {
+
+                var previews =
+                    json &&
+                    json.data &&
+                    json.data.video &&
+                    json.data.video.seekPreviewsURL;
+
+                var cut =
+                    previews
+                        ? previews.indexOf('/storyboards/')
+                        : -1;
+
+                if (cut < 0) {
+
+                    dvrMarkVodBlocked(id);
+
+                    return;
+
+                }
+
+                dvrProbeRenditions(
+                    previews.substring(0, cut),
+                    0,
+                    id
+                );
+
+            },
+            function () {
+
+                dvrMarkVodBlocked(id);
+
+            }
+        );
+
+    }
+
+
+    function dvrProbeRenditions(base, index, id) {
+
+        if (index >= DVR_VOD_RENDITIONS.length) {
+
+            dvrMarkVodBlocked(id);
+
+            return;
+
+        }
+
+        var url =
+            base + '/' + DVR_VOD_RENDITIONS[index] + '/index-dvr.m3u8';
+
+        fetch(url, { method: 'GET' })
+            .then(function (response) {
+
+                if (!response.ok) {
+
+                    dvrProbeRenditions(base, index + 1, id);
+
+                    return;
+
+                }
+
+                dvrVodAccess[id] = {
+                    state: 'bypass',
+                    url: url
+                };
+
+                delete dvrVodAccessPending[id];
+
+                positionDvrButton();
+
+            })
+            .catch(function () {
+
+                dvrProbeRenditions(base, index + 1, id);
+
+            });
+
+    }
+
+
+    function dvrMarkVodBlocked(id) {
+
+        if (!id) {
+            return;
+        }
+
+        dvrVodAccess[id] = { state: 'blocked', url: null };
+
+        delete dvrVodAccessPending[id];
+
+        positionDvrButton();
+
+    }
+
+
+    // Échec constaté pendant la lecture : on condamne ce VOD pour de
+    // bon plutôt que de le represcrire au prochain clic.
+    function dvrMarkChannelVodBlocked(channel) {
+
+        var entry = channel ? dvrVodCache[channel] : null;
+
+        if (entry && entry.id) {
+
+            dvrMarkVodBlocked(entry.id);
+
+        }
+
+    }
+
+
+    function dvrGql(query, variables, done, fail) {
+
+        fetch('https://gql.twitch.tv/gql', {
+
+            method: 'POST',
+
+            headers: {
+                'Content-Type': 'text/plain;charset=UTF-8',
+                'Client-Id': TWITCH_GQL_CLIENT_ID
+            },
+
+            body: JSON.stringify({
+                query: query,
+                variables: variables
+            })
+
+        })
+            .then(function (response) {
+                return response.json();
+            })
+            .then(done)
+            .catch(function () {
+
+                if (fail) {
+                    fail();
+                }
+
+            });
+
+    }
+
+
+    function dvrVodDepthSeconds(info) {
+
+        if (!info) {
+            return 0;
+        }
+
+        var depth =
+            (Date.now() - info.startWall) / 1000 -
+            DVR_VOD_LAG_SECONDS;
+
+        return depth > 0 ? depth : 0;
+
+    }
+
+
+    // ------------------------------------------------------------
+    // Profondeur disponible
+    // ------------------------------------------------------------
+
+    function dvrBufferDepthFor(channel) {
+
+        if (dvrBlobProbe === false) {
+            return 0;
+        }
+
+        if (
+            !channel ||
+            dvrUnsupportedChannel === channel ||
+            dvrSegmentsChannel !== channel ||
+            dvrSegments.length < 2
+        ) {
+            return 0;
+        }
+
+        return dvrSegmentsSpan;
+
+    }
+
+
+    // Âge du segment le plus récent. Normalement deux ou trois
+    // secondes ; il grimpe dès que le lecteur Twitch s'arrête de
+    // télécharger, donc pendant toute une pause. Tout ce que la
+    // mémoire contient est décalé d'autant.
+    function dvrBufferLagSeconds() {
+
+        if (!dvrSegmentsEndWall) {
+            return 0;
+        }
+
+        var lag = (Date.now() - dvrSegmentsEndWall) / 1000;
+
+        return lag > 0 ? lag : 0;
+
+    }
+
+
+    function dvrMaxOffsetFor(channel) {
+
+        var buffer = dvrBufferDepthFor(channel);
+
+        if (buffer > 0) {
+            buffer += dvrBufferLagSeconds();
+        }
+
+        var vod =
+            dvrVodDepthSeconds(
+                dvrVodInfoFor(channel)
+            );
+
+        return buffer > vod ? buffer : vod;
+
+    }
+
+
+    // ------------------------------------------------------------
+    // Playlist reconstruit à partir de la mémoire
+    // ------------------------------------------------------------
+
+    function dvrBuildBufferPlaylist() {
+
+        var target = 2;
+
+        dvrSegments.forEach(
+            function (segment) {
+
+                if (segment.dur > target) {
+                    target = segment.dur;
+                }
+
+            }
+        );
+
+        var rows = [
+            '#EXTM3U',
+            '#EXT-X-VERSION:3',
+            '#EXT-X-PLAYLIST-TYPE:VOD',
+            '#EXT-X-TARGETDURATION:' + Math.ceil(target),
+            '#EXT-X-MEDIA-SEQUENCE:0'
+        ];
+
+        // Un changement de qualité en cours de route change la
+        // résolution et parfois le codec : sans discontinuité
+        // annoncée, le lecteur se bloque à la jointure.
+        var previousVariant = null;
+
+        dvrSegments.forEach(
+            function (segment) {
+
+                if (
+                    previousVariant !== null &&
+                    segment.variant !== previousVariant
+                ) {
+
+                    rows.push('#EXT-X-DISCONTINUITY');
+
+                }
+
+                previousVariant = segment.variant;
+
+                rows.push(
+                    '#EXTINF:' +
+                    segment.dur.toFixed(3) +
+                    ','
+                );
+
+                rows.push(segment.url);
+
+            }
+        );
+
+        rows.push('#EXT-X-ENDLIST');
+
+        return rows.join('\n');
+
+    }
+
+
+    // ------------------------------------------------------------
+    // Conversion position de lecture <-> retard sur le direct
+    // ------------------------------------------------------------
+
+    function dvrCurrentOffset() {
+
+        // Direct en pause : rien ne joue, mais le direct, lui,
+        // continue d'avancer sans nous. Le retard, c'est le temps
+        // passé depuis le gel — et c'est exactement là qu'on
+        // repartira.
+        if (dvrIsLivePaused()) {
+            return (Date.now() - dvrLivePauseAt) / 1000;
+        }
+
+        // En mode direct notre lecteur ne joue rien : sa position
+        // vaut zéro et la convertir donnerait un retard absurde.
+        if (dvrIsLive() || !dvrVideo) {
+            return 0;
+        }
+
+        var offset =
+            (
+                Date.now() -
+                (
+                    dvrSourceStartWall +
+                    dvrVideo.currentTime * 1000
+                )
+            ) / 1000;
+
+        return offset > 0 ? offset : 0;
+
+    }
+
+
+    function dvrMediaTimeForOffset(offset) {
+
+        return (
+            Date.now() -
+            offset * 1000 -
+            dvrSourceStartWall
+        ) / 1000;
+
+    }
+
+
+    // « 45 s », « 3 min », « 2 h 10 » : une portée s'annonce
+    // autrement qu'une position de lecture.
+    function dvrFormatReach(seconds) {
+
+        var total = Math.round(seconds);
+
+        if (total < 90) {
+            return total + ' s';
+        }
+
+        if (total < 3600) {
+            return Math.round(total / 60) + ' min';
+        }
+
+        var hours = Math.floor(total / 3600);
+        var minutes = Math.round((total % 3600) / 60);
+
+        return minutes
+            ? hours + ' h ' + minutes
+            : hours + ' h';
+
+    }
+
+
+    function dvrFormatOffset(seconds) {
+
+        var total = Math.max(0, Math.round(seconds));
+
+        var hours = Math.floor(total / 3600);
+        var minutes = Math.floor((total % 3600) / 60);
+        var rest = total % 60;
+
+        var text =
+            minutes +
+            ':' +
+            (rest < 10 ? '0' : '') +
+            rest;
+
+        if (hours > 0) {
+
+            text =
+                hours +
+                ':' +
+                (minutes < 10 ? '0' : '') +
+                text;
+
+        }
+
+        return '-' + text;
+
+    }
+
+
+    // ------------------------------------------------------------
+    // Ouverture / fermeture
+    // ------------------------------------------------------------
+
+    function openDvr(startOffset) {
+
+        if (dvrOverlay) {
+            return;
+        }
+
+        var channel =
+            getWatchedChannel() ||
+            getTestChannel();
+
+        if (!channel) {
+            return;
+        }
+
+        if (!dvrSupported()) {
+
+            alert(
+                'Le retour arrière a besoin de hls.js, que Tampermonkey n\'a pas réussi à charger. Recharge la page, ou vérifie que le script a bien le droit de récupérer ses dépendances.'
+            );
+
+            return;
+
+        }
+
+        dvrChannelInUse = channel;
+
+        injectDvrCSS();
+
+        // Le lecteur Twitch doit être repéré AVANT que la barre ne
+        // se câble : c'est de lui qu'elle prend le volume. L'ordre
+        // inverse faisait démarrer le lecteur perso à 100 %.
+        dvrFindLivePlayer();
+
+        // Le son de la barre part de celui du lecteur Twitch :
+        // c'est le seul que l'utilisateur ait réglé.
+        dvrAdoptVolumeFrom(dvrLiveVideo);
+
+        dvrBuildOverlay();
+
+        dvrStartTicker();
+
+        // On n'ouvre plus dans le passé : la barre se pose sur le
+        // direct, qui continue de jouer sur le lecteur Twitch avec
+        // son son. Rien n'est remplacé tant qu'on n'a pas reculé.
+        dvrEnterLiveMode();
+
+        // Sauf quand on vient rattraper une pause faite sur le
+        // lecteur de Twitch lui-même : voir watchNativeTwitchPause.
+        if (startOffset > DVR_LIVE_EDGE_SECONDS) {
+
+            dvrGoToOffset(startOffset);
+
+        }
+
+    }
+
+
+    function closeDvr() {
+
+        if (!dvrOverlay) {
+            return;
+        }
+
+        dvrStopTicker();
+
+        dvrUnwatchPointer();
+
+        dvrDestroyPlayback();
+
+        dvrSendHold(false);
+
+        try {
+            dvrOverlay.remove();
+        } catch (e) {}
+
+        dvrOverlay = null;
+        dvrVideo = null;
+        dvrSourceKind = null;
+        dvrChannelInUse = null;
+        dvrLivePauseAt = 0;
+        dvrPendingPause = false;
+
+        dvrRestoreLivePlayer();
+
+    }
+
+
+    function dvrDestroyPlayback() {
+
+        if (dvrHls) {
+
+            try {
+                dvrHls.destroy();
+            } catch (e) {}
+
+            dvrHls = null;
+
+        }
+
+        if (dvrPlaylistUrl) {
+
+            try {
+                URL.revokeObjectURL(dvrPlaylistUrl);
+            } catch (e) {}
+
+            dvrPlaylistUrl = null;
+
+        }
+
+    }
+
+
+    // Repère le lecteur Twitch et retient son état sonore, sans
+    // y toucher : en mode direct c'est lui qu'on écoute.
+    function dvrFindLivePlayer() {
+
+        dvrLiveVideo = findPlaybackVideo();
+
+    }
+
+
+    function dvrRestoreLiveSound() {
+
+        if (!dvrLiveVideo) {
+            return;
+        }
+
+        try {
+
+            dvrLiveVideo.muted = dvrVolumeMuted;
+            dvrLiveVideo.volume = dvrVolumeLevel;
+
+            if (dvrLiveVideo.paused) {
+
+                var resumed = dvrLiveVideo.play();
+
+                if (resumed && resumed.catch) {
+                    resumed.catch(function () {});
+                }
+
+            }
+
+        } catch (e) {}
+
+    }
+
+
+    function dvrRestoreLivePlayer() {
+
+        dvrRestoreLiveSound();
+
+        dvrLiveVideo = null;
+
+    }
+
+
+    // ------------------------------------------------------------
+    // Mode direct
+    // ------------------------------------------------------------
+    //
+    // ⏪ ne fait plus reculer : il pose la barre par-dessus le
+    // lecteur Twitch, qui continue de jouer le direct avec son
+    // son. La surface laisse passer les clics, les contrôles de
+    // Twitch restent donc utilisables, et RIEN n'est remplacé
+    // tant qu'on n'a pas tiré le curseur en arrière.
+    //
+    // Conséquence voulue : tant qu'on ne touche à rien, il ne se
+    // passe rien — aucun rechargement, et le direct ne prend
+    // aucun retard puisque c'est toujours Twitch qui joue.
+
+    var DVR_LIVE_EDGE_SECONDS = 3;
+
+    // Pas des boutons ⏪ / ⏩. À 10 s il fallait cliquer trois fois
+    // pour revoir une action ratée ; ici on fouille un passé court,
+    // autant avancer par vraies enjambées.
+    var DVR_SKIP_SECONDS = 30;
+
+
+    function dvrIsLive() {
+
+        return dvrSourceKind === 'live';
+
+    }
+
+
+    function dvrEnterLiveMode() {
+
+        if (!dvrOverlay) {
+            return;
+        }
+
+        dvrDestroyPlayback();
+
+        dvrSourceKind = 'live';
+
+        // Revenir au direct annule le gel : on y est, il n'y a plus
+        // rien à rattraper.
+        dvrLivePauseAt = 0;
+        dvrPendingPause = false;
+
+        dvrOverlay.classList.add('tp9dvr-live-mode');
+
+        dvrSetStatus('');
+
+        // Plus rien ne se lit depuis la mémoire : le Worker peut
+        // reprendre son expiration normale.
+        dvrSendHold(false);
+
+        dvrRestoreLiveSound();
+
+        dvrRefreshControls();
+
+    }
+
+
+    function dvrLeaveLiveMode() {
+
+        if (!dvrOverlay) {
+            return;
+        }
+
+        dvrOverlay.classList.remove('tp9dvr-live-mode');
+
+        dvrSourceKind = null;
+
+        dvrLivePauseAt = 0;
+
+        // Le lecteur Twitch continue de tourner derrière : c'est
+        // lui qui alimente la mémoire, et c est ce qui rend le
+        // retour au direct instantané. On le fait juste taire.
+        if (dvrLiveVideo) {
+
+            try {
+
+                dvrLiveVideo.muted = true;
+
+                // Il a pu être arrêté par le bouton pause du
+                // direct : on le relance, sinon la mémoire cesse de
+                // se remplir et le retour au direct devient lent.
+                if (dvrLiveVideo.paused) {
+
+                    var restarted = dvrLiveVideo.play();
+
+                    if (restarted && restarted.catch) {
+                        restarted.catch(function () {});
+                    }
+
+                }
+
+            } catch (e) {}
+
+        }
+
+        dvrSendHold(true);
+
+    }
+
+
+    // ------------------------------------------------------------
+    // PAUSE SUR LE DIRECT
+    // ------------------------------------------------------------
+    //
+    // Le bouton était grisé, au motif que mettre le direct en pause
+    // arrêterait ce qui remplit la mémoire. C'est vrai — mais ça ne
+    // vaut que pour la mémoire : quand la chaîne a un VOD, il
+    // s'enregistre tout seul pendant qu'on ne regarde pas, et rien
+    // ne justifie alors de refuser la pause.
+    //
+    // Deux chemins, donc, et ils ne se valent pas :
+    //
+    //   VOD     — vraie pause : on arrête le lecteur Twitch, donc
+    //             aussi le téléchargement, et la reprise repart du
+    //             moment du gel, lue dans l'enregistrement. Aucune
+    //             limite de durée.
+    //
+    //   mémoire — le lecteur Twitch DOIT continuer, c'est lui qui
+    //             la remplit : on bascule sur la mémoire et c'est
+    //             NOTRE lecteur qu'on fige. La pause tient tant que
+    //             le Worker garde les segments.
+    //
+    // Dans les deux cas la reprise passe par dvrGoToOffset : elle
+    // repart où on s'est arrêté, jamais au direct.
+
+    function dvrIsLivePaused() {
+
+        return dvrLivePauseAt > 0;
+
+    }
+
+
+    function dvrLivePauseKind() {
+
+        if (!dvrChannelInUse) {
+            return null;
+        }
+
+        if (dvrVodInfoFor(dvrChannelInUse)) {
+            return 'vod';
+        }
+
+        if (dvrBufferDepthFor(dvrChannelInUse) > 0) {
+            return 'buffer';
+        }
+
+        return null;
+
+    }
+
+
+    function dvrPauseLive() {
+
+        var kind = dvrLivePauseKind();
+
+        if (!kind) {
+            return;
+        }
+
+        if (kind === 'buffer') {
+
+            dvrPendingPause = true;
+
+            // Juste derrière le bord du direct : assez pour que la
+            // mémoire ait déjà le passage, pas assez pour que le
+            // saut se voie.
+            dvrGoToOffset(
+                dvrBufferLagSeconds() + DVR_LIVE_EDGE_SECONDS + 1
+            );
+
+            return;
+
+        }
+
+        if (!dvrLiveVideo) {
+            return;
+        }
+
+        dvrLivePauseAt = Date.now();
+
+        try {
+            dvrLiveVideo.pause();
+        } catch (e) {}
+
+        dvrRefreshControls();
+
+    }
+
+
+    function dvrResumeLive() {
+
+        var offset = (Date.now() - dvrLivePauseAt) / 1000;
+
+        dvrLivePauseAt = 0;
+
+        // Un gel de deux secondes ne vaut pas qu'on charge une
+        // source : dvrGoToOffset renvoie alors au direct tout seul.
+        dvrGoToOffset(offset);
+
+    }
+
+
+    // Le gel demandé depuis le direct ne peut s'appliquer qu'une
+    // fois la source prête à rendre une image.
+    function dvrApplyPendingPause() {
+
+        if (!dvrPendingPause) {
+            return false;
+        }
+
+        dvrPendingPause = false;
+
+        try {
+            dvrVideo.pause();
+        } catch (e) {}
+
+        dvrRefreshControls();
+
+        return true;
+
+    }
+
+
+    // La vidéo qu'on entend : celle de Twitch en direct, la
+    // nôtre dans le passé.
+    function dvrActiveVideo() {
+
+        return dvrIsLive() ? dvrLiveVideo : dvrVideo;
+
+    }
+
+
+    // Le volume suit les DEUX lecteurs : celui qui joue et celui
+    // qui attend. Sans ça, passer de l'un à l'autre faisait
+    // sauter le son.
+    // Il n'y a plus qu'UN état du son, et il est ici. Avant, le
+    // bouton de coupure lisait la propriété muted du lecteur, le
+    // curseur affichait le dernier niveau appliqué, et personne ne
+    // relisait le lecteur Twitch quand l'utilisateur touchait SES
+    // commandes à lui : les trois racontaient donc trois choses
+    // différentes — pictogramme muet alors que le son sortait,
+    // curseur au milieu alors qu'on venait de couper, et un clic
+    // qui semblait sans effet une fois sur deux.
+    //
+    // dvrVolumeLevel ne descend jamais à 0 : couper le son est une
+    // coupure, pas un niveau. Rétablir le son après une coupure
+    // faite à 0 ne rendait rien d'audible, d'où le bouton qui avait
+    // l'air cassé.
+
+    function dvrEffectiveVolume() {
+
+        return dvrVolumeMuted ? 0 : dvrVolumeLevel;
+
+    }
+
+
+    // Reprend l'état d'un lecteur ; renvoie true s'il disait autre
+    // chose que nous.
+    function dvrAdoptVolumeFrom(video) {
+
+        if (!video) {
+            return false;
+        }
+
+        var muted = !!video.muted || video.volume === 0;
+
+        var level = video.volume > 0 ? video.volume : dvrVolumeLevel;
+
+        if (
+            muted === dvrVolumeMuted &&
+            Math.abs(level - dvrVolumeLevel) < 0.005
+        ) {
+            return false;
+        }
+
+        dvrVolumeMuted = muted;
+        dvrVolumeLevel = level;
+
+        return true;
+
+    }
+
+
+    // Écrit l'état sur les deux lecteurs, le curseur et le bouton.
+    function dvrPushVolume() {
+
+        try {
+
+            if (dvrVideo) {
+
+                dvrVideo.volume = dvrVolumeLevel;
+                dvrVideo.muted = dvrVolumeMuted;
+
+            }
+
+            if (dvrLiveVideo) {
+
+                dvrLiveVideo.volume = dvrVolumeLevel;
+
+                // En lecture du passé, le lecteur Twitch reste muet
+                // quoi qu'il arrive : c'est le nôtre qu'on entend.
+                dvrLiveVideo.muted =
+                    dvrIsLive() ? dvrVolumeMuted : true;
+
+            }
+
+        } catch (e) {}
+
+        var slider = dvrOverlay
+            ? dvrOverlay.querySelector('.tp9dvr-vol')
+            : null;
+
+        if (slider) {
+
+            // Coupé, le curseur tombe à zéro : c'est ce qu'on
+            // entend, et c'est ce que fait le lecteur de Twitch.
+            slider.value =
+                String(Math.round(dvrEffectiveVolume() * 100));
+
+        }
+
+        dvrRefreshControls();
+
+    }
+
+
+    function dvrApplyVolume(level, muted) {
+
+        if (typeof level === 'number' && level > 0) {
+            dvrVolumeLevel = level > 1 ? 1 : level;
+        }
+
+        dvrVolumeMuted = !!muted;
+
+        dvrPushVolume();
+
+    }
+
+
+    // Le son peut changer ailleurs que dans notre barre : touche M
+    // de Twitch, son propre curseur, ou un lecteur remplacé en
+    // cours de route. On relit donc celui qu'on entend, sinon notre
+    // bouton reste sur un état que plus personne ne porte.
+    function dvrSyncVolumeFromPlayer() {
+
+        if (dvrLiveVideo && dvrLiveVideo.isConnected === false) {
+
+            // Lecteur remplacé (changement de qualité, publicité) :
+            // le nôtre pilotait un élément détaché, d'où un bouton
+            // qui coupait un son qu'on continuait d'entendre.
+            dvrFindLivePlayer();
+
+            dvrPushVolume();
+
+            return;
+
+        }
+
+        // En lecture du passé, c'est nous qui pilotons les deux
+        // lecteurs : relire ne ferait que reprendre notre propre
+        // coupure du lecteur Twitch.
+        if (!dvrIsLive()) {
+            return;
+        }
+
+        if (dvrAdoptVolumeFrom(dvrLiveVideo)) {
+            dvrPushVolume();
+        }
+
+    }
+
+
+    var dvrVolumeHintTimer = null;
+
+    // Le curseur de volume est minuscule : à la molette, c'est
+    // le chiffre qui dit où on en est.
+    function dvrShowVolumeHint(level, muted) {
+
+        if (!dvrOverlay) {
+            return;
+        }
+
+        var hint =
+            dvrOverlay.querySelector('.tp9dvr-vol-hint');
+
+        if (!hint) {
+            return;
+        }
+
+        // Régler le volume sans bouger la souris ne doit pas se
+        // faire sur une barre effacée : on la rappelle, et on la
+        // retient le temps de l'indication — sur le direct c'est la
+        // barre de Twitch qui commande, et elle n'a aucune raison de
+        // se montrer pour un coup de molette.
+        dvrBarForcedUntil = Date.now() + 1200;
+
+        dvrShowBar();
+
+        hint.innerHTML =
+            (muted ? DVR_ICONS.volumeOff : DVR_ICONS.volume) +
+            '<span>' +
+            (muted ? 'Muet' : Math.round(level * 100) + ' %') +
+            '</span>';
+
+        hint.classList.add('tp9dvr-vol-hint-on');
+
+        if (dvrVolumeHintTimer) {
+            clearTimeout(dvrVolumeHintTimer);
+        }
+
+        dvrVolumeHintTimer = setTimeout(
+            function () {
+
+                dvrVolumeHintTimer = null;
+
+                hint.classList.remove('tp9dvr-vol-hint-on');
+
+            },
+            900
+        );
+
+    }
+
+    // ------------------------------------------------------------
+    // Choix et chargement de la source
+    // ------------------------------------------------------------
+
+    function dvrPickSource(offset) {
+
+        var bufferDepth =
+            dvrBufferDepthFor(dvrChannelInUse);
+
+        var vodInfo =
+            dvrVodInfoFor(dvrChannelInUse);
+
+        var vodDepth =
+            dvrVodDepthSeconds(vodInfo);
+
+        var lag = dvrBufferLagSeconds();
+
+        // La mémoire d'abord tant qu'elle couvre le moment demandé :
+        // elle est instantanée, et elle seule a les toutes dernières
+        // secondes.
+        //
+        // « Couvrir » suppose du contenu APRÈS le moment demandé :
+        // son segment le plus récent date de lag secondes, tout ce
+        // qui est plus frais n'existe pas chez elle. Sans cette
+        // borne, une reprise de pause repartait sur une mémoire qui
+        // se terminait pile à l'instant demandé — donc sur rien.
+        if (
+            bufferDepth > 0 &&
+            offset >= lag + DVR_LIVE_EDGE_SECONDS &&
+            offset <= lag + bufferDepth - 2
+        ) {
+            return 'buffer';
+        }
+
+        if (
+            vodInfo &&
+            vodDepth > offset
+        ) {
+            return 'vod';
+        }
+
+        // Aucune des deux ne remonte aussi loin : on prend celle qui
+        // va le plus haut plutôt que de renvoyer le lecteur vers une
+        // source qui n'a pas ce qu'on lui demande. C'est exactement
+        // ce qui repartait sur un VOD injouable alors que la mémoire
+        // avait déjà quelques dizaines de secondes.
+        if (bufferDepth > 0 && offset > lag) {
+            return 'buffer';
+        }
+
+        return vodInfo ? 'vod' : null;
+
+    }
+
+
+    function dvrGoToOffset(offset) {
+
+        if (!dvrOverlay) {
+            return;
+        }
+
+        // Le bouton part sur 30 s par défaut : si la mémoire n'a que
+        // 20 s et qu'il n'y a pas de VOD, on lit ces 20 s au lieu de
+        // chercher une source capable d'aller plus loin.
+        var reach = dvrMaxOffsetFor(dvrChannelInUse);
+
+        if (reach > 0 && offset > reach) {
+            offset = reach;
+        }
+
+        if (offset < 1) {
+            offset = 1;
+        }
+
+        // Revenu au bord du direct : on rend la main au lecteur
+        // Twitch au lieu de charger une source pour deux secondes
+        // de retard. C'est aussi le cas quand il n'y a rien à
+        // rejouer du tout — le plafond ramène alors l'offset à 1.
+        if (offset <= DVR_LIVE_EDGE_SECONDS) {
+
+            dvrEnterLiveMode();
+
+            return;
+
+        }
+
+        if (dvrIsLive()) {
+
+            dvrLeaveLiveMode();
+
+        }
+
+        var kind = dvrPickSource(offset);
+
+        if (!kind) {
+
+            dvrPendingPause = false;
+
+            dvrSetStatus(
+                'Rien à rejouer pour le moment.'
+            );
+
+            return;
+
+        }
+
+        if (
+            kind === dvrSourceKind &&
+            dvrHls
+        ) {
+
+            dvrSeekWithinSource(offset);
+
+            dvrApplyPendingPause();
+
+            return;
+
+        }
+
+        dvrLoadSource(kind, offset);
+
+    }
+
+
+    function dvrSeekWithinSource(offset) {
+
+        if (!dvrVideo) {
+            return;
+        }
+
+        var target = dvrMediaTimeForOffset(offset);
+
+        if (target < 0) {
+            target = 0;
+        }
+
+        var duration = dvrVideo.duration;
+
+        if (
+            duration &&
+            isFinite(duration) &&
+            target > duration - 0.5
+        ) {
+
+            target = duration - 0.5;
+
+        }
+
+        try {
+            dvrVideo.currentTime = target;
+        } catch (e) {}
+
+    }
+
+
+    function dvrLoadSource(kind, offset) {
+
+        if (dvrSwitching) {
+            return;
+        }
+
+        dvrSwitching = true;
+
+        dvrSetStatus(
+            kind === 'vod'
+                ? 'Chargement du VOD…'
+                : 'Chargement…'
+        );
+
+        if (kind === 'vod') {
+
+            // dvrVodInfoFor ne renvoie que du lisible, et son URL est
+            // résolue depuis longtemps : le clic ne déclenche plus
+            // aucun aller-retour réseau avant la lecture.
+            var info =
+                dvrVodInfoFor(dvrChannelInUse);
+
+            if (!info) {
+
+                dvrSwitching = false;
+
+                dvrHandleSourceFailure(offset);
+
+                return;
+
+            }
+
+            dvrAttachSource(
+                'vod',
+                info.url,
+                info.startWall,
+                offset
+            );
+
+            return;
+
+        }
+
+        var text = dvrBuildBufferPlaylist();
+
+        dvrDestroyPlayback();
+
+        try {
+
+            dvrPlaylistUrl =
+                URL.createObjectURL(
+                    new Blob(
+                        [text],
+                        {
+                            type: 'application/vnd.apple.mpegurl'
+                        }
+                    )
+                );
+
+        } catch (e) {
+
+            dvrSwitching = false;
+
+            dvrSetStatus(
+                'Impossible de reconstruire le flux.'
+            );
+
+            return;
+
+        }
+
+        console.log(
+            '[TwitchProxy][DVR] Playlist reconstruit :',
+            dvrSegments.length,
+            'segments,',
+            Math.round(dvrSegmentsSpan),
+            's'
+        );
+
+        // Le playlist est une photo de la mémoire à cet instant :
+        // son instant 0, c'est la fin de ce qu'elle a reçu moins sa
+        // profondeur. Surtout pas « maintenant » : le lecteur Twitch
+        // a pu cesser de télécharger entre-temps (une pause), et
+        // tout se retrouvait alors décalé de la durée de cet arrêt.
+        dvrAttachSource(
+            'buffer',
+            dvrPlaylistUrl,
+            (dvrSegmentsEndWall || Date.now()) - dvrSegmentsSpan * 1000,
+            offset
+        );
+
+    }
+
+
+    function dvrAttachSource(kind, url, startWall, offset) {
+
+        var lib = dvrHlsLib();
+
+        if (!lib) {
+
+            dvrSwitching = false;
+
+            return;
+
+        }
+
+        if (kind === 'vod') {
+
+            dvrDestroyPlayback();
+
+        }
+
+        dvrSourceKind = kind;
+        dvrSourceStartWall = startWall;
+
+        dvrHls = new lib({
+            enableWorker: false,
+            lowLatencyMode: false,
+            backBufferLength: 90
+        });
+
+        dvrHls.on(
+            lib.Events.MANIFEST_PARSED,
+            function () {
+
+                dvrSwitching = false;
+
+                dvrSetStatus('');
+
+                dvrSeekWithinSource(offset);
+
+                // Gel demandé depuis le direct : la source a été
+                // chargée pour s'y arrêter, pas pour la jouer.
+                if (dvrApplyPendingPause()) {
+                    return;
+                }
+
+                var played = dvrVideo.play();
+
+                if (played && played.then) {
+
+                    played.then(
+                        dvrRefreshControls,
+                        dvrRefreshControls
+                    );
+
+                }
+
+                dvrRefreshControls();
+
+            }
+        );
+
+        dvrHls.on(
+            lib.Events.ERROR,
+            function (event, data) {
+
+                if (!data || !data.fatal) {
+                    return;
+                }
+
+                dvrSwitching = false;
+
+                dvrLastErrorDetail =
+                    data.details || data.type || null;
+
+                // Sans ce détail, « Lecture impossible » ne dit ni
+                // quelle source a échoué, ni pourquoi.
+                console.warn(
+                    '[TwitchProxy][DVR] Erreur fatale',
+                    {
+                        source: dvrSourceKind,
+                        type: data.type,
+                        details: data.details,
+                        reason: data.reason,
+                        url: data.url ||
+                            (data.context && data.context.url),
+                        status: data.response && data.response.code
+                    }
+                );
+
+                logEvent(
+                    'error',
+                    'Retour arrière (' +
+                    (dvrSourceKind === 'vod' ? 'VOD' : 'mémoire') +
+                    ') : ' +
+                    (data.details || data.type)
+                );
+
+                // Le VOD a échoué alors qu'on le croyait lisible :
+                // on le condamne définitivement plutôt que de le
+                // reproposer à la prochaine expiration du cache.
+                if (dvrSourceKind === 'vod') {
+
+                    dvrMarkChannelVodBlocked(dvrChannelInUse);
+
+                }
+
+                dvrHandleSourceFailure(
+                    dvrCurrentOffset() || offset
+                );
+
+            }
+        );
+
+        dvrHls.loadSource(url);
+
+        dvrHls.attachMedia(dvrVideo);
+
+    }
+
+
+    function dvrHandleSourceFailure(offset) {
+
+        dvrPendingPause = false;
+
+        dvrDestroyPlayback();
+
+        var previous = dvrSourceKind;
+
+        dvrSourceKind = null;
+
+        var fallback = dvrPickSource(offset);
+
+        if (
+            !fallback ||
+            fallback === previous
+        ) {
+
+            var message =
+                (
+                    previous === 'vod'
+                        ? 'Ce VOD est inaccessible.'
+                        : 'Lecture impossible depuis la mémoire.'
+                ) +
+                (
+                    dvrLastErrorDetail
+                        ? ' (' + dvrLastErrorDetail + ')'
+                        : ''
+                );
+
+            // Rester sur un écran noir ne sert à rien : on remet le
+            // direct, et le message s'efface tout seul.
+            dvrEnterLiveMode();
+
+            dvrSetStatus(message, true);
+
+            return;
+
+        }
+
+        dvrLoadSource(fallback, offset);
+
+    }
+
+
+    // ------------------------------------------------------------
+    // Pictogrammes des commandes
+    // ------------------------------------------------------------
+    //
+    // Même facture que les boutons de Twitch : un tracé plein, à
+    // la couleur du texte, dans une boîte de 16 px. Un emoji, lui,
+    // dépend de la police du système — taille, couleur et ligne de
+    // base varient d'une machine à l'autre, et c'est ce qui
+    // faisait tache juste au-dessus de la barre de Twitch.
+
+    function dvrSvg(body) {
+
+        return (
+            '<svg width="16" height="16" viewBox="0 0 24 24"' +
+            ' aria-hidden="true">' +
+            body +
+            '</svg>'
+        );
+
+    }
+
+
+    var DVR_ICONS = {
+
+        play: dvrSvg(
+            '<path fill="currentColor" d="M7 4.5v15l12-7.5z"/>'
+        ),
+
+        pause: dvrSvg(
+            '<path fill="currentColor" d="M6.5 4.5h4v15h-4zm7 0h4v15h-4z"/>'
+        ),
+
+        back: dvrSvg(
+            '<path fill="currentColor" d="M11.5 5.5v13L2.5 12zM21.5 5.5v13l-9-6.5z"/>'
+        ),
+
+        forward: dvrSvg(
+            '<path fill="currentColor" d="M12.5 5.5v13l9-6.5zM2.5 5.5v13l9-6.5z"/>'
+        ),
+
+        volume: dvrSvg(
+            '<path fill="currentColor" d="M4 9h3.5L12 5v14l-4.5-4H4z"/>' +
+            '<path fill="none" stroke="currentColor" stroke-width="1.8"' +
+            ' stroke-linecap="round" d="M15.5 9.2a4 4 0 0 1 0 5.6"/>' +
+            '<path fill="none" stroke="currentColor" stroke-width="1.8"' +
+            ' stroke-linecap="round" d="M18.4 6.8a8 8 0 0 1 0 10.4"/>'
+        ),
+
+        volumeOff: dvrSvg(
+            '<path fill="currentColor" d="M4 9h3.5L12 5v14l-4.5-4H4z"/>' +
+            '<path fill="none" stroke="currentColor" stroke-width="1.9"' +
+            ' stroke-linecap="round" d="M15.6 9.6l5 5m0-5l-5 5"/>'
+        ),
+
+        fullscreen: dvrSvg(
+            '<path fill="currentColor" d="M4 9V4h5v2H6v3H4zm11-5h5v5h-2V6h-3V4zM4 15h2v3h3v2H4v-5zm14 0h2v5h-5v-2h3v-3z"/>'
+        ),
+
+        close: dvrSvg(
+            '<path fill="none" stroke="currentColor" stroke-width="2"' +
+            ' stroke-linecap="round" d="M6 6l12 12M18 6L6 18"/>'
+        )
+
+    };
+
+
+    // ------------------------------------------------------------
+    // Effacement automatique de la barre
+    // ------------------------------------------------------------
+    //
+    // La souris est suivie sur le DOCUMENT et non sur l'habillage :
+    // en mode direct celui-ci est en `pointer-events: none` pour
+    // laisser passer les clics vers le lecteur Twitch, il ne
+    // recevrait donc aucun survol. On compare la position du
+    // curseur au cadre de l'habillage, qui épouse déjà le lecteur.
+
+    function dvrBarElement() {
+
+        return dvrOverlay
+            ? dvrOverlay.querySelector('.tp9dvr-bar')
+            : null;
+
+    }
+
+
+    function dvrShowBar() {
+
+        var bar = dvrBarElement();
+
+        if (!bar) {
+            return;
+        }
+
+        bar.classList.remove('tp9dvr-bar-hidden');
+
+        dvrArmBarHide();
+
+    }
+
+
+    function dvrArmBarHide() {
+
+        // Sur le direct, c'est la barre de Twitch qui donne le
+        // tempo (voir dvrSyncBarWithTwitch) : deux minuteurs
+        // concurrents, c'était justement le problème.
+        if (dvrMirrorsTwitchBar()) {
+            return;
+        }
+
+        if (dvrBarTimer) {
+            clearTimeout(dvrBarTimer);
+        }
+
+        dvrBarTimer = setTimeout(
+            function () {
+
+                dvrBarTimer = null;
+
+                // Le curseur est posé sur la barre, ou en train
+                // de tirer le curseur de position : la faire
+                // disparaître sous la main serait absurde. On
+                // réarme et on repose la question plus tard.
+                if (dvrBarHovered || dvrScrubbing) {
+
+                    dvrArmBarHide();
+
+                    return;
+
+                }
+
+                dvrHideBar();
+
+            },
+            DVR_BAR_HIDE_MS
+        );
+
+    }
+
+
+    function dvrHideBar() {
+
+        var bar = dvrBarElement();
+
+        // Déjà effacée : l'effacement est déclenché par le
+        // mouvement de la souris, donc plusieurs fois par seconde.
+        // Sans ce garde, tout ce qui suit serait rejoué à chaque
+        // pixel parcouru.
+        if (
+            !bar ||
+            bar.classList.contains('tp9dvr-bar-hidden')
+        ) {
+            return;
+        }
+
+        bar.classList.add('tp9dvr-bar-hidden');
+
+        // Une infobulle accrochée à un bouton de la barre qui
+        // vient de s'effacer resterait seule à l'écran. Mais la
+        // bulle est PARTAGÉE par tout le script : la fermer sans
+        // regarder à qui elle appartient effaçait aussi celle du
+        // bouton du menu et celle du ⏪ — tous deux sous le
+        // lecteur, donc hors du cadre, donc survolés au moment
+        // précis où l'on efface.
+        if (tooltipTarget && bar.contains(tooltipTarget)) {
+            hideTooltip();
+        }
+
+    }
+
+
+    // ------------------------------------------------------------
+    // SUR LE DIRECT, LA BARRE SUIT CELLE DE TWITCH
+    // ------------------------------------------------------------
+    //
+    // Notre barre est posée SUR le lecteur Twitch, dont les
+    // commandes restent utilisables juste dessous : les deux doivent
+    // donc apparaître et disparaître ensemble. Avec deux minuteurs
+    // indépendants — 2,5 s chez nous, environ 3 s chez eux — la
+    // nôtre s'effaçait toujours un peu avant, et on restait devant
+    // le lecteur de Twitch tout seul.
+    //
+    // On ne se fie à aucun nom de classe, ils changent à chaque
+    // refonte : on part d'un repère stable (leur bouton lecture) et
+    // on remonte ses parents en lisant l'opacité calculée, qui est
+    // ce qu'ils animent.
+
+    var DVR_TWITCH_CONTROLS_ANCHORS = [
+        '[data-a-target="player-controls"]',
+        '[data-a-target="player-play-pause-button"]'
+    ];
+
+    // Relu au plus quelques fois par seconde : la question est
+    // posée à chaque mouvement de souris, et une remontée de
+    // parents en styles calculés n'a pas à tourner soixante fois
+    // par seconde.
+    var dvrTwitchBarCache = { at: 0, value: null };
+
+    function dvrReadTwitchControlsVisible() {
+
+        var anchor = null;
+
+        for (var i = 0; i < DVR_TWITCH_CONTROLS_ANCHORS.length; i++) {
+
+            anchor = document.querySelector(
+                DVR_TWITCH_CONTROLS_ANCHORS[i]
+            );
+
+            if (anchor) {
+                break;
+            }
+
+        }
+
+        if (!anchor) {
+            return null;
+        }
+
+        try {
+
+            var element = anchor;
+
+            var depth = 0;
+
+            while (element && depth < 8) {
+
+                var style = window.getComputedStyle(element);
+
+                if (
+                    style.display === 'none' ||
+                    style.visibility === 'hidden' ||
+                    parseFloat(style.opacity) < 0.05
+                ) {
+                    return false;
+                }
+
+                element = element.parentElement;
+
+                depth++;
+
+            }
+
+        } catch (e) {
+
+            return null;
+
+        }
+
+        return true;
+
+    }
+
+
+    // true / false, ou null quand on n'a pas su regarder : notre
+    // minuteur reprend alors la main, comme avant.
+    function dvrTwitchControlsVisible() {
+
+        var now = Date.now();
+
+        if ((now - dvrTwitchBarCache.at) < 120) {
+            return dvrTwitchBarCache.value;
+        }
+
+        dvrTwitchBarCache = {
+            at: now,
+            value: dvrReadTwitchControlsVisible()
+        };
+
+        return dvrTwitchBarCache.value;
+
+    }
+
+
+    function dvrMirrorsTwitchBar() {
+
+        return (
+            dvrIsLive() &&
+            dvrTwitchControlsVisible() !== null
+        );
+
+    }
+
+
+    function dvrSyncBarWithTwitch() {
+
+        if (!dvrOverlay || !dvrIsLive()) {
+            return;
+        }
+
+        var visible = dvrTwitchControlsVisible();
+
+        if (visible === null) {
+            return;
+        }
+
+        // La souris est posée sur notre barre, on tire le curseur de
+        // position, ou on vient de régler le volume à la molette :
+        // elle ne disparaît pas sous la main, même si Twitch efface
+        // la sienne.
+        if (
+            !visible &&
+            (
+                dvrBarHovered ||
+                dvrScrubbing ||
+                Date.now() < dvrBarForcedUntil
+            )
+        ) {
+            return;
+        }
+
+        // Un seul maître à la fois : notre minuteur n'a plus rien à
+        // dire tant que celui de Twitch décide.
+        if (dvrBarTimer) {
+
+            clearTimeout(dvrBarTimer);
+
+            dvrBarTimer = null;
+
+        }
+
+        if (!visible) {
+
+            dvrHideBar();
+
+            return;
+
+        }
+
+        var bar = dvrBarElement();
+
+        if (bar) {
+            bar.classList.remove('tp9dvr-bar-hidden');
+        }
+
+    }
+
+
+    // Le VOD est résolu en tâche de fond : le bouton pause peut
+    // devenir disponible bien après l'ouverture de la barre.
+    var dvrLastPauseKind = null;
+
+
+    function dvrPointerOnPlayer(event) {
+
+        if (!dvrOverlay) {
+            return false;
+        }
+
+        var rect = dvrOverlay.getBoundingClientRect();
+
+        return (
+            event.clientX >= rect.left &&
+            event.clientX <= rect.right &&
+            event.clientY >= rect.top &&
+            event.clientY <= rect.bottom
+        );
+
+    }
+
+
+    function dvrWatchPointer() {
+
+        dvrUnwatchPointer();
+
+        dvrPointerWatcher = function (event) {
+
+            if (dvrPointerOnPlayer(event)) {
+
+                dvrShowBar();
+
+                return;
+
+            }
+
+            // Souris sortie du lecteur : rien à attendre, elle n'y
+            // revient pas par accident. Sauf en plein glissement,
+            // où l'on peut très bien dépasser le cadre.
+            if (dvrScrubbing) {
+                return;
+            }
+
+            // Sur le direct, c'est Twitch qui décide : sa barre
+            // reste parfois affichée un instant après que la souris
+            // est sortie, la nôtre doit rester avec elle.
+            if (dvrMirrorsTwitchBar()) {
+                return;
+            }
+
+            if (dvrBarTimer) {
+
+                clearTimeout(dvrBarTimer);
+
+                dvrBarTimer = null;
+
+            }
+
+            dvrHideBar();
+
+        };
+
+        document.addEventListener(
+            'mousemove',
+            dvrPointerWatcher,
+            true
+        );
+
+    }
+
+
+    function dvrUnwatchPointer() {
+
+        if (dvrPointerWatcher) {
+
+            document.removeEventListener(
+                'mousemove',
+                dvrPointerWatcher,
+                true
+            );
+
+            dvrPointerWatcher = null;
+
+        }
+
+        if (dvrBarTimer) {
+
+            clearTimeout(dvrBarTimer);
+
+            dvrBarTimer = null;
+
+        }
+
+        dvrBarHovered = false;
+
+    }
+
+
+    // ------------------------------------------------------------
+    // Habillage
+    // ------------------------------------------------------------
+
+    function dvrBuildOverlay() {
+
+        dvrOverlay =
+            document.createElement('div');
+
+        dvrOverlay.className = 'tp9dvr';
+
+        dvrOverlay.innerHTML =
+            '<video class="tp9dvr-video" playsinline></video>' +
+            '<div class="tp9dvr-status"></div>' +
+            '<div class="tp9dvr-vol-hint"></div>' +
+            '<div class="tp9dvr-bar">' +
+            '<button class="tp9dvr-btn tp9dvr-play" type="button"' +
+            ' data-tp9-tip="Pause">' + DVR_ICONS.pause + '</button>' +
+            '<button class="tp9dvr-btn tp9dvr-back" type="button"' +
+            ' data-tp9-tip="Reculer de 30 s"' +
+            ' data-tp9-tip-sub="Repart 30 secondes plus tôt que la position actuelle.">' +
+            DVR_ICONS.back + '</button>' +
+            '<button class="tp9dvr-btn tp9dvr-fwd" type="button"' +
+            ' data-tp9-tip="Avancer de 30 s"' +
+            ' data-tp9-tip-sub="Se rapproche du direct de 30 secondes.">' +
+            DVR_ICONS.forward + '</button>' +
+            '<span class="tp9dvr-time"' +
+            ' data-tp9-tip="Retard sur le direct"' +
+            ' data-tp9-tip-sub="Ce qui te sépare de ce qui se joue en ce moment.">-0:30</span>' +
+            '<input type="range" class="tp9dvr-seek" min="0" max="1000" value="1000"' +
+            ' data-tp9-tip="Position dans le passé"' +
+            ' data-tp9-tip-sub="À gauche le plus ancien disponible, à droite le direct.">' +
+            '<span class="tp9dvr-source"></span>' +
+            '<button class="tp9dvr-btn tp9dvr-mute" type="button"' +
+            ' data-tp9-tip="Couper le son">' + DVR_ICONS.volume + '</button>' +
+            '<input type="range" class="tp9dvr-vol" min="0" max="100" value="100"' +
+            ' data-tp9-tip="Volume"' +
+            ' data-tp9-tip-sub="La molette sur le lecteur le règle aussi, par pas de 1 %.">' +
+            '<button class="tp9dvr-btn tp9dvr-full" type="button"' +
+            ' data-tp9-tip="Plein écran">' +
+            DVR_ICONS.fullscreen +
+            '</button>' +
+            '<button class="tp9dvr-live" type="button"' +
+            ' data-tp9-tip="Revenir au direct"' +
+            ' data-tp9-tip-sub="Sans fermer la barre : tu peux repartir en arrière juste après.">' +
+            '<span class="tp9dvr-live-dot"></span>DIRECT</button>' +
+            '<button class="tp9dvr-btn tp9dvr-close" type="button"' +
+            ' data-tp9-tip="Fermer la barre"' +
+            ' data-tp9-tip-sub="Rend la main au lecteur Twitch et à son son.">' +
+            DVR_ICONS.close + '</button>' +
+            '</div>';
+
+        dvrHost().appendChild(dvrOverlay);
+
+        // Les infobulles maison plutôt que les title du navigateur :
+        // elles s'affichent tout de suite (title attend une seconde)
+        // et tiennent deux lignes, de quoi dire ce que fait une
+        // commande ET pourquoi elle est parfois sans effet.
+        attachTooltips(dvrOverlay);
+
+        dvrVideo =
+            dvrOverlay.querySelector('.tp9dvr-video');
+
+        dvrWireControls();
+
+        // Survoler la barre elle-même la maintient : sans ça, une
+        // souris immobile sur un bouton verrait la barre
+        // s'effacer sous elle au bout de 2,5 s.
+        var bar = dvrBarElement();
+
+        bar.addEventListener(
+            'mouseenter',
+            function () {
+
+                dvrBarHovered = true;
+
+                dvrShowBar();
+
+            }
+        );
+
+        bar.addEventListener(
+            'mouseleave',
+            function () {
+
+                dvrBarHovered = false;
+
+                dvrArmBarHide();
+
+            }
+        );
+
+        dvrWatchPointer();
+
+        // Visible à l'ouverture : le clic vient d'avoir lieu, la
+        // souris est forcément là.
+        dvrShowBar();
+
+        positionDvrOverlay();
+
+    }
+
+
+    // En plein écran, seul le contenu de l'élément plein écran est
+    // visible : l'habillage doit y déménager, sinon il disparaît.
+    function dvrHost() {
+
+        return (
+            document.fullscreenElement ||
+            document.body
+        );
+
+    }
+
+
+    var dvrStatusTimer = null;
+
+    // `transient` : message posé par-dessus le direct, qui doit
+    // donc disparaître au lieu de masquer le stream.
+    function dvrSetStatus(text, transient) {
+
+        if (!dvrOverlay) {
+            return;
+        }
+
+        var node =
+            dvrOverlay.querySelector('.tp9dvr-status');
+
+        if (!node) {
+            return;
+        }
+
+        if (dvrStatusTimer) {
+
+            clearTimeout(dvrStatusTimer);
+
+            dvrStatusTimer = null;
+
+        }
+
+        node.textContent = text || '';
+
+        node.style.display =
+            text ? 'flex' : 'none';
+
+        if (text && transient) {
+
+            dvrStatusTimer = setTimeout(
+                function () {
+
+                    dvrStatusTimer = null;
+
+                    dvrSetStatus('');
+
+                },
+                6000
+            );
+
+        }
+
+    }
+
+
+    function dvrWireControls() {
+
+        var playButton =
+            dvrOverlay.querySelector('.tp9dvr-play');
+
+        var seek =
+            dvrOverlay.querySelector('.tp9dvr-seek');
+
+        var volume =
+            dvrOverlay.querySelector('.tp9dvr-vol');
+
+        var mute =
+            dvrOverlay.querySelector('.tp9dvr-mute');
+
+
+        // Le volume du lecteur Twitch a été repris à l'ouverture
+        // (voir openDvr) : il ne reste qu'à l'appliquer aux deux
+        // lecteurs, au curseur et au bouton.
+        dvrPushVolume();
+
+
+        // Molette = volume, par pas de 1 %. Twitch monte par pas de
+        // 10 %, bien trop grossier pour ajuster.
+        //
+        // En mode direct la surface laisse passer les clics, donc
+        // l'événement n'arrive que sur la barre ; dans le passé,
+        // il arrive sur toute la vidéo.
+        dvrOverlay.addEventListener(
+            'wheel',
+            function (event) {
+
+                var active = dvrActiveVideo();
+
+                if (!active) {
+                    return;
+                }
+
+                // Sans ça, la page défile sous le lecteur.
+                event.preventDefault();
+
+                var step = event.deltaY < 0 ? 0.01 : -0.01;
+
+                // Monter le son alors qu'il est coupé le rétablit au
+                // niveau choisi : repartir de 1 % obligerait à
+                // trente coups de molette pour se rendre audible.
+                var level =
+                    (dvrVolumeMuted && step > 0)
+                        ? dvrVolumeLevel
+                        : Math.round(
+                            (dvrEffectiveVolume() + step) * 100
+                        ) / 100;
+
+                if (level < 0) {
+                    level = 0;
+                }
+
+                if (level > 1) {
+                    level = 1;
+                }
+
+                dvrApplyVolume(level, level === 0);
+
+                dvrShowVolumeHint(level, level === 0);
+
+            },
+            { passive: false }
+        );
+
+
+        playButton.addEventListener(
+            'click',
+            function () {
+
+                // Sur le direct, ce n'est ni le même lecteur qu'on
+                // fige ni au même endroit qu'on reprend : voir
+                // dvrPauseLive.
+                if (dvrIsLive()) {
+
+                    if (dvrIsLivePaused()) {
+                        dvrResumeLive();
+                    } else {
+                        dvrPauseLive();
+                    }
+
+                    return;
+
+                }
+
+                if (dvrVideo.paused) {
+
+                    var played = dvrVideo.play();
+
+                    if (played && played.catch) {
+                        played.catch(function () {});
+                    }
+
+                } else {
+
+                    dvrVideo.pause();
+
+                }
+
+                dvrRefreshControls();
+
+            }
+        );
+
+
+        dvrOverlay
+            .querySelector('.tp9dvr-back')
+            .addEventListener(
+                'click',
+                function () {
+
+                    dvrGoToOffset(
+                        dvrCurrentOffset() + DVR_SKIP_SECONDS
+                    );
+
+                }
+            );
+
+
+        dvrOverlay
+            .querySelector('.tp9dvr-fwd')
+            .addEventListener(
+                'click',
+                function () {
+
+                    if (dvrIsLive()) {
+                        return;
+                    }
+
+                    var next = dvrCurrentOffset() - DVR_SKIP_SECONDS;
+
+                    if (next < 1) {
+                        next = 1;
+                    }
+
+                    dvrGoToOffset(next);
+
+                }
+            );
+
+
+        // Revient au direct SANS fermer la barre : on reste prêt à
+        // repartir en arrière.
+        dvrOverlay
+            .querySelector('.tp9dvr-live')
+            .addEventListener(
+                'click',
+                function () {
+
+                    dvrEnterLiveMode();
+
+                }
+            );
+
+
+        dvrOverlay
+            .querySelector('.tp9dvr-close')
+            .addEventListener(
+                'click',
+                function () {
+
+                    closeDvr();
+
+                }
+            );
+
+
+        dvrOverlay
+            .querySelector('.tp9dvr-full')
+            .addEventListener(
+                'click',
+                function () {
+
+                    if (document.fullscreenElement) {
+
+                        document.exitFullscreen();
+
+                    } else if (dvrOverlay.requestFullscreen) {
+
+                        dvrOverlay.requestFullscreen();
+
+                    }
+
+                }
+            );
+
+
+        mute.addEventListener(
+            'click',
+            function () {
+
+                dvrApplyVolume(
+                    dvrVolumeLevel,
+                    !dvrVolumeMuted
+                );
+
+                // Le curseur seul ne dit pas ce qui vient de se
+                // passer quand il était déjà au bout : le chiffre,
+                // si.
+                dvrShowVolumeHint(
+                    dvrEffectiveVolume(),
+                    dvrVolumeMuted
+                );
+
+            }
+        );
+
+
+        volume.addEventListener(
+            'input',
+            function (event) {
+
+                var level =
+                    parseInt(event.target.value, 10) / 100;
+
+                dvrApplyVolume(level, level === 0);
+
+            }
+        );
+
+
+        seek.addEventListener(
+            'pointerdown',
+            function () {
+
+                dvrScrubbing = true;
+
+            }
+        );
+
+
+        seek.addEventListener(
+            'change',
+            function (event) {
+
+                dvrScrubbing = false;
+
+                var max =
+                    dvrMaxOffsetFor(dvrChannelInUse);
+
+                var ratio =
+                    parseInt(event.target.value, 10) / 1000;
+
+                var offset = max * (1 - ratio);
+
+                if (offset < 1) {
+                    offset = 1;
+                }
+
+                dvrGoToOffset(offset);
+
+            }
+        );
+
+
+        dvrVideo.addEventListener(
+            'ended',
+            function () {
+
+                // On a rattrapé le direct : il n'y a plus rien à
+                // rejouer, le lecteur Twitch reprend la main — sans
+                // fermer la barre, on peut vouloir repartir.
+                dvrEnterLiveMode();
+
+            }
+        );
+
+
+        dvrVideo.addEventListener(
+            'play',
+            dvrRefreshControls
+        );
+
+        dvrVideo.addEventListener(
+            'pause',
+            dvrRefreshControls
+        );
+
+    }
+
+
+    function dvrRefreshControls() {
+
+        if (!dvrOverlay || !dvrVideo) {
+            return;
+        }
+
+        var live = dvrIsLive();
+
+        var livePaused = dvrIsLivePaused();
+
+        // Sur le direct, le bouton ne vaut que si on sait rattraper
+        // ce qu'on va manquer pendant le gel (voir dvrPauseLive).
+        var pauseKind = live ? dvrLivePauseKind() : null;
+
+        var paused = live ? livePaused : dvrVideo.paused;
+
+        // Pendant un gel, il y a de nouveau quelque chose devant, et
+        // un direct à rejoindre.
+        var atLiveEdge = live && !livePaused;
+
+        var playButton =
+            dvrOverlay.querySelector('.tp9dvr-play');
+
+        if (playButton) {
+
+            playButton.innerHTML =
+                paused
+                    ? DVR_ICONS.play
+                    : DVR_ICONS.pause;
+
+            playButton.disabled = atLiveEdge && !pauseKind;
+
+            playButton.dataset.tp9Tip = playButton.disabled
+                ? 'Direct en cours'
+                : (paused ? 'Reprendre' : 'Pause');
+
+            if (playButton.disabled) {
+
+                playButton.dataset.tp9TipSub =
+                    "Mettre le direct en pause arrêterait l'enregistrement en mémoire, et cette chaîne n'a pas de VOD pour rattraper. Arme le retour arrière dans le menu (Alt + P).";
+
+            } else if (live) {
+
+                playButton.dataset.tp9TipSub = paused
+                    ? "Reprend là où tu t'es arrêté, pas au direct."
+                    : (pauseKind === 'vod'
+                        ? 'Arrête le direct, téléchargement compris ; la reprise repart de là, lue dans le VOD.'
+                        : "Fige l'image ; le direct continue derrière pour remplir la mémoire, et la reprise repart de là.");
+
+            } else {
+
+                playButton.dataset.tp9TipSub =
+                    'Fige la lecture du passé ; le direct, lui, continue derrière.';
+
+            }
+
+        }
+
+        var forward =
+            dvrOverlay.querySelector('.tp9dvr-fwd');
+
+        if (forward) {
+
+            forward.disabled = atLiveEdge;
+
+            forward.dataset.tp9TipSub = atLiveEdge
+                ? "Tu es déjà au direct : il n'y a rien devant."
+                : 'Se rapproche du direct de 30 secondes.';
+
+        }
+
+        var liveButton =
+            dvrOverlay.querySelector('.tp9dvr-live');
+
+        if (liveButton) {
+
+            liveButton.disabled = atLiveEdge;
+
+            liveButton.dataset.tp9TipSub = atLiveEdge
+                ? 'Tu y es déjà.'
+                : 'Sans fermer la barre : tu peux repartir en arrière juste après.';
+
+        }
+
+        var mute =
+            dvrOverlay.querySelector('.tp9dvr-mute');
+
+        if (mute) {
+
+            // L'état, et non ce qu'en dit le lecteur : c'est leur
+            // désaccord qui affichait « muet » alors que le son
+            // sortait toujours.
+            var silent = dvrVolumeMuted;
+
+            mute.innerHTML = silent
+                ? DVR_ICONS.volumeOff
+                : DVR_ICONS.volume;
+
+            mute.dataset.tp9Tip =
+                silent ? 'Rétablir le son' : 'Couper le son';
+
+        }
+
+        var source =
+            dvrOverlay.querySelector('.tp9dvr-source');
+
+        if (source) {
+
+            // Gelé sur le direct, on n'y est plus : la pastille
+            // rouge dirait le contraire de l'horloge juste à côté,
+            // qui compte le retard qu'on est en train de prendre.
+            source.textContent = live
+                ? (livePaused ? 'en pause' : 'direct')
+                : (dvrSourceKind === 'vod' ? 'VOD' : 'mémoire');
+
+            source.classList.toggle(
+                'tp9dvr-source-live',
+                atLiveEdge
+            );
+
+            source.dataset.tp9Tip = live
+                ? (livePaused ? 'Direct en pause' : 'Source : le direct')
+                : (dvrSourceKind === 'vod'
+                    ? 'Source : le VOD'
+                    : 'Source : la mémoire');
+
+            source.dataset.tp9TipSub = live
+                ? (livePaused
+                    ? "Le direct continue sans toi : la reprise repartira d'ici."
+                    : "Le lecteur Twitch joue le direct : rien n'est remplacé tant que tu ne recules pas.")
+                : (dvrSourceKind === 'vod'
+                    ? 'Lu depuis le VOD que Twitch enregistre en parallèle du live.'
+                    : 'Lu depuis les segments gardés en mémoire pour cette chaîne.');
+
+        }
+
+    }
+
+    function dvrTick() {
+
+        if (!dvrOverlay || !dvrVideo) {
+            return;
+        }
+
+        dvrSyncVolumeFromPlayer();
+
+        dvrSyncBarWithTwitch();
+
+        var pauseKind = dvrIsLive() ? dvrLivePauseKind() : null;
+
+        if (pauseKind !== dvrLastPauseKind) {
+
+            dvrLastPauseKind = pauseKind;
+
+            dvrRefreshControls();
+
+        }
+
+        var offset = dvrCurrentOffset();
+
+        var label =
+            dvrOverlay.querySelector('.tp9dvr-time');
+
+        if (label) {
+
+            // Gelé sur le direct, l'horloge compte le retard qu'on
+            // prend : c'est exactement de là qu'on repartira.
+            label.textContent = (dvrIsLive() && !dvrIsLivePaused())
+                ? 'DIRECT'
+                : dvrFormatOffset(offset);
+
+        }
+
+        if (!dvrScrubbing) {
+
+            var seek =
+                dvrOverlay.querySelector('.tp9dvr-seek');
+
+            var max =
+                dvrMaxOffsetFor(dvrChannelInUse);
+
+            if (seek && max > 0) {
+
+                var ratio = 1 - (offset / max);
+
+                if (ratio < 0) {
+                    ratio = 0;
+                }
+
+                if (ratio > 1) {
+                    ratio = 1;
+                }
+
+                seek.value =
+                    String(Math.round(ratio * 1000));
+
+            }
+
+        }
+
+        positionDvrOverlay();
+
+    }
+
+
+    function dvrStartTicker() {
+
+        dvrStopTicker();
+
+        dvrTicker = setInterval(dvrTick, 250);
+
+    }
+
+
+    function dvrStopTicker() {
+
+        if (dvrTicker) {
+
+            clearInterval(dvrTicker);
+
+            dvrTicker = null;
+
+        }
+
+    }
+
+
+    // ------------------------------------------------------------
+    // Position : l'habillage se cale sur le lecteur Twitch
+    // ------------------------------------------------------------
+
+    function positionDvrOverlay() {
+
+        if (!dvrOverlay) {
+            return;
+        }
+
+        if (document.fullscreenElement === dvrOverlay) {
+
+            dvrOverlay.style.position = 'fixed';
+            dvrOverlay.style.left = '0';
+            dvrOverlay.style.top = '0';
+            dvrOverlay.style.width = '100%';
+            dvrOverlay.style.height = '100%';
+
+            return;
+
+        }
+
+        var host = dvrHost();
+
+        if (dvrOverlay.parentNode !== host) {
+
+            host.appendChild(dvrOverlay);
+
+        }
+
+        var player = findPlayer();
+
+        if (!player) {
+
+            closeDvr();
+
+            return;
+
+        }
+
+        var rect = player.getBoundingClientRect();
+
+        dvrOverlay.style.position = 'fixed';
+        dvrOverlay.style.left = rect.left + 'px';
+        dvrOverlay.style.top = rect.top + 'px';
+        dvrOverlay.style.width = rect.width + 'px';
+        dvrOverlay.style.height = rect.height + 'px';
+
+    }
+
+
+    // ------------------------------------------------------------
+    // Bouton ⏪ à côté du bouton du menu
+    // ------------------------------------------------------------
+
+    function createDvrButton() {
+
+        injectDvrCSS();
+
+        dvrButton =
+            document.createElement('button');
+
+        dvrButton.id = 'tp9-dvr-button';
+
+        dvrButton.type = 'button';
+
+        // Même facture que le bouclier du menu : une icône
+        // vectorielle, et non un emoji dont le rendu — bleu, cerné,
+        // de travers — dépend de la police du système. C'est lui qui
+        // faisait tache à côté des boutons de Twitch.
+        dvrButton.innerHTML =
+            '<svg width="16" height="16" viewBox="0 0 24 24"' +
+            ' fill="currentColor" aria-hidden="true">' +
+            '<path d="M20.5 6.2v11.6L11.5 12z"/>' +
+            '<path d="M11.5 6.2v11.6L2.5 12z"/>' +
+            '</svg>';
+
+        dvrButton.style.visibility = 'hidden';
+
+        dvrButton.addEventListener(
+            'click',
+            function () {
+
+                if (dvrButton.disabled) {
+                    return;
+                }
+
+                openDvr();
+
+            }
+        );
+
+        document.body.appendChild(dvrButton);
+
+        attachTooltips(dvrButton);
+
+    }
+
+
+    function positionDvrButton() {
+
+        if (!dashboardButton) {
+            return;
+        }
+
+        if (!dvrButton) {
+
+            createDvrButton();
+
+        }
+
+        var channel = getTestChannel();
+
+        // Le bouton du menu connaît déjà toutes les raisons de ne pas
+        // s'afficher (aperçu, mini-player, page sans lecteur) : on
+        // suit sa décision plutôt que de la refaire.
+        if (
+            !channel ||
+            dashboardButton.style.visibility === 'hidden'
+        ) {
+
+            dvrButton.style.visibility = 'hidden';
+
+            return;
+
+        }
+
+        var bufferDepth = dvrBufferDepthFor(channel);
+
+        var vodInfo = dvrVodInfoFor(channel);
+
+        var armed = isDvrChannelArmed(channel);
+
+        // La moindre seconde en mémoire vaut mieux que rien : le
+        // retard demandé est de toute façon plafonné à ce qui
+        // existe (voir dvrGoToOffset).
+        var available =
+            bufferDepth > 0 ||
+            !!vodInfo;
+
+        dvrButton.disabled = !available;
+
+        dvrButton.classList.toggle(
+            'tp9-dvr-off',
+            !available
+        );
+
+        dvrButton.dataset.tp9Tip = 'Retour arrière';
+
+        var vodReach = vodInfo
+            ? dvrFormatReach(dvrVodDepthSeconds(vodInfo))
+            : null;
+
+        var vodVia = (vodInfo && vodInfo.state === 'bypass')
+            ? ' (VOD abonnés, lu en direct depuis le CDN)'
+            : ' (VOD)';
+
+        if (vodInfo && bufferDepth > 0) {
+
+            dvrButton.dataset.tp9TipSub =
+                'Jusqu\'à ' + vodReach + vodVia +
+                ', et les ' + dvrFormatReach(bufferDepth) +
+                ' les plus récentes en mémoire.';
+
+        } else if (vodInfo) {
+
+            dvrButton.dataset.tp9TipSub =
+                'Jusqu\'à ' + vodReach + vodVia + '.';
+
+        } else if (bufferDepth > 0) {
+
+            dvrButton.dataset.tp9TipSub =
+                dvrFormatReach(bufferDepth) + ' en mémoire pour cette chaîne.';
+
+        } else if (dvrUnsupportedChannel === channel) {
+
+            dvrButton.dataset.tp9TipSub =
+                'Ce flux est diffusé dans un format que la mémoire ne sait pas rejouer, et il n\'y a pas de VOD exploitable sur cette chaîne.';
+
+        } else if (dvrVodPendingFor(channel)) {
+
+            dvrButton.dataset.tp9TipSub =
+                'Recherche d\'un enregistrement en cours…';
+
+        } else if (armed) {
+
+            dvrButton.dataset.tp9TipSub =
+                'Aucun VOD exploitable sur cette chaîne. La mémoire enregistre, laisse-lui quelques secondes.';
+
+        } else {
+
+            dvrButton.dataset.tp9TipSub =
+                'Aucun VOD exploitable sur cette chaîne. Arme le retour arrière dans le menu (Alt + P) pour garder les dernières minutes en mémoire.';
+
+        }
+
+        dvrButton.style.visibility = 'visible';
+
+        dvrButton.style.position = 'fixed';
+
+        // La POSITION ÉCRITE du bouton du menu, jamais son cadre
+        // mesuré : au survol il se soulève de 2 px (`--tp9-lift`),
+        // et ce décalage entre dans son getBoundingClientRect().
+        // Le bouton ⏪, recalculé en boucle, se soulevait donc
+        // avec lui — les deux avaient l'air soudés. Le style en
+        // ligne, lui, ignore les transformées.
+        var rect =
+            dashboardButton.getBoundingClientRect();
+
+        var anchorLeft = parseFloat(dashboardButton.style.left);
+        var anchorTop = parseFloat(dashboardButton.style.top);
+
+        if (isNaN(anchorLeft)) {
+            anchorLeft = rect.left;
+        }
+
+        if (isNaN(anchorTop)) {
+            anchorTop = rect.top;
+        }
+
+        // Même écart que celui du bouton du menu au bouton Suivre
+        // (44 px pour un bouton large de 40) : à 40 px, les deux
+        // pastilles se touchaient presque.
+        dvrButton.style.left =
+            (anchorLeft - 44) + 'px';
+
+        dvrButton.style.top =
+            anchorTop + 'px';
+
+        positionDvrOverlay();
+
+    }
+
+
+    // ------------------------------------------------------------
+    // PAUSE FAITE SUR LE LECTEUR DE TWITCH LUI-MÊME
+    // ------------------------------------------------------------
+    //
+    // Mettre le vrai lecteur en pause puis le relancer renvoie au
+    // direct : Twitch n'a aucune idée de ce qu'on vient de manquer.
+    // Le VOD, lui, l'a — il continue de s'enregistrer pendant ce
+    // temps-là.
+    //
+    // On ne détourne pas la reprise pour autant : une pause sert
+    // souvent à partir, pas à revenir en arrière. On propose, un
+    // clic suffit, et ne rien faire laisse le direct comme avant.
+    //
+    // Sans VOD il n'y a rien à proposer : la mémoire ne se remplit
+    // pas non plus pendant que le lecteur est arrêté.
+
+    var NATIVE_PAUSE_MIN_MS = 15000;
+    var NATIVE_PAUSE_MAX_MS = 4 * 60 * 60 * 1000;
+
+    var nativePauseVideo = null;
+    var nativePauseWasPlaying = false;
+    var nativePauseAt = 0;
+    var nativePauseChannel = null;
+
+    function watchNativeTwitchPause() {
+
+        // La barre est ouverte : c'est elle qui pilote la pause,
+        // voir dvrPauseLive.
+        if (dvrOverlay) {
+
+            nativePauseAt = 0;
+
+            return;
+
+        }
+
+        var channel = getTestChannel();
+
+        var video = channel ? findPlaybackVideo() : null;
+
+        if (!video) {
+
+            nativePauseVideo = null;
+            nativePauseAt = 0;
+
+            return;
+
+        }
+
+        // Élément neuf (arrivée sur la chaîne, changement de
+        // qualité, publicité) : on repart de ce qu'il fait sans
+        // rien en conclure. Sinon la pause d'avant lecture, au
+        // chargement de la page, passait pour une pause voulue.
+        if (video !== nativePauseVideo) {
+
+            nativePauseVideo = video;
+            nativePauseWasPlaying = !video.paused;
+            nativePauseAt = 0;
+            nativePauseChannel = channel;
+
+            return;
+
+        }
+
+        if (video.paused) {
+
+            if (nativePauseWasPlaying && !nativePauseAt) {
+
+                nativePauseAt = Date.now();
+                nativePauseChannel = channel;
+
+            }
+
+            return;
+
+        }
+
+        nativePauseWasPlaying = true;
+
+        if (!nativePauseAt) {
+            return;
+        }
+
+        var pausedMs = Date.now() - nativePauseAt;
+
+        var pausedChannel = nativePauseChannel;
+
+        nativePauseAt = 0;
+
+        if (
+            pausedChannel !== channel ||
+            pausedMs < NATIVE_PAUSE_MIN_MS ||
+            pausedMs > NATIVE_PAUSE_MAX_MS
+        ) {
+            return;
+        }
+
+        if (!dvrVodInfoFor(channel)) {
+            return;
+        }
+
+        showToast({
+
+            icon: '⏪',
+
+            title: "Reprendre où tu t'es arrêté ?",
+
+            text:
+                'Le lecteur est reparti au direct, mais le VOD a les ' +
+                dvrFormatReach(pausedMs / 1000) +
+                ' que tu viens de manquer.',
+
+            ok: true,
+
+            duration: 15000,
+
+            actions: [
+                {
+                    label: '⏪ Rattraper',
+                    onClick: function () {
+
+                        hideToast();
+
+                        openDvr(pausedMs / 1000);
+
+                    }
+                }
+            ]
+
+        });
+
+    }
+
+
+    // positionPlayerUI() a une demi-douzaine de sorties anticipées :
+    // plutôt que d'y saupoudrer un appel à chacune, on l'enrobe une
+    // fois. Le bouton ⏪ se cale sur la position que le bouton du
+    // menu vient de prendre.
+    var dvrBasePositionPlayerUI = positionPlayerUI;
+
+    positionPlayerUI = function () {
+
+        dvrBasePositionPlayerUI();
+
+        positionDvrButton();
+
+    };
+
+
+    document.addEventListener(
+        'fullscreenchange',
+        function () {
+
+            positionDvrOverlay();
+
+        }
+    );
+
+
+    // ------------------------------------------------------------
+    // Estimation mémoire du curseur de profondeur
+    // ------------------------------------------------------------
+    //
+    // Calculée sur le débit RÉELLEMENT mesuré par le Worker quand il
+    // y en a un : une table fixe se tromperait d'un facteur trois
+    // entre du 480p et du 1080p60.
+
+    function dvrEstimateBytes(seconds) {
+
+        var bps =
+            getLiveThroughputBps() ||
+            DVR_FALLBACK_BYTES_PER_SECOND;
+
+        return seconds * bps;
+
+    }
+
+
+    // L'estimation bouge pendant qu'on déplace le curseur : c'est
+    // tout l'intérêt d'un curseur plutôt que d'une liste déroulante,
+    // 30 min ne veut rien dire tant qu'on n'a pas vu « 1,4 Go ».
+    function updateDvrDepthLabels(seconds) {
+
+        if (!dashboard) {
+            return;
+        }
+
+        var value =
+            dashboard.querySelector('.tp9-dvr-depth-value');
+
+        if (value) {
+
+            value.textContent =
+                dvrBufferLabel(seconds);
+
+        }
+
+        var hint =
+            dashboard.querySelector('.tp9-dvr-depth-hint');
+
+        if (hint) {
+
+            hint.textContent =
+                '≈ ' +
+                formatBytes(
+                    dvrEstimateBytes(seconds)
+                ) +
+                ' en mémoire · ' +
+                (
+                    getLiveThroughputBps()
+                        ? 'd\'après ton débit mesuré'
+                        : 'estimation, aucun débit mesuré pour l\'instant'
+                );
+
+        }
+
+    }
+
+
+    function injectDvrCSS() {
+
+        if (
+            document.getElementById('tp9-dvr-style')
+        ) {
+            return;
+        }
+
+        var style =
+            document.createElement('style');
+
+        style.id = 'tp9-dvr-style';
+
+        style.textContent = DVR_CSS;
+
+        document.head.appendChild(style);
 
     }
 
@@ -19414,6 +24157,28 @@ dashboardButton.style.visibility =
                                     '[TwitchProxy] Configuration mise à jour'
                                 );
 
+                                __tp_dvrSyncConfig();
+
+                            }
+
+                            // Le lecteur de retour arrière demande
+                            // qu'on suspende l'expiration des
+                            // segments tant qu'il est ouvert :
+                            // révoquer un blob en cours de lecture
+                            // couperait la vidéo.
+                            if (
+                                event.data &&
+                                event.data.type === 'dvrControl' &&
+                                event.data.tabId === __tp_tabId
+                            ) {
+
+                                __tp_dvrHold =
+                                    !!event.data.hold;
+
+                                if (!__tp_dvrHold) {
+                                    __tp_dvrTrim();
+                                }
+
                             }
 
                         } catch(e) {}
@@ -19767,6 +24532,397 @@ dashboardButton.style.visibility =
 
 
         // --------------------------------------------------------
+        // Capture des segments pour le retour arrière
+        // --------------------------------------------------------
+        //
+        // Les octets passent déjà par ici pour être comptés : les
+        // garder coûte un clone de plus, pas un téléchargement de
+        // plus. On stocke des Blob et on ne fait traverser que
+        // leur URL — un ArrayBuffer envoyé en BroadcastChannel
+        // serait recopié dans TOUS les onglets twitch.tv ouverts,
+        // ce qui est hors de question pour de la vidéo.
+
+        lines.push(`
+
+            var __tp_dvrRing = [];
+            var __tp_dvrDurations = {};
+            var __tp_dvrSpan = 0;
+            var __tp_dvrTotal = 0;
+            var __tp_dvrSeq = 0;
+            var __tp_dvrHold = false;
+            var __tp_dvrBlobOk = true;
+            var __tp_dvrUnsupported = false;
+
+
+            function __tp_dvrActive(){
+
+                return (
+                    __tp_dvrBlobOk &&
+                    !__tp_dvrUnsupported &&
+                    __tp_dvrSpan > 0
+                );
+
+            }
+
+
+            function __tp_dvrChannelOn(channel){
+
+                try {
+
+                    return !!(
+                        channel &&
+                        __tp_config &&
+                        __tp_config.dvrChannels &&
+                        __tp_config.dvrChannels[channel]
+                    );
+
+                } catch(e) {
+
+                    return false;
+
+                }
+
+            }
+
+
+            function __tp_dvrSyncConfig(){
+
+                try {
+
+                    var span = 0;
+
+                    if (
+                        __tp_config &&
+                        __tp_config.dvrBufferSeconds > 0 &&
+                        __tp_dvrChannelOn(__tp_lastChannel)
+                    ) {
+
+                        span = __tp_config.dvrBufferSeconds;
+
+                    }
+
+                    if (span === __tp_dvrSpan) {
+                        return;
+                    }
+
+                    __tp_dvrSpan = span;
+
+                    if (!span) {
+
+                        __tp_dvrClear();
+
+                    } else {
+
+                        __tp_dvrTrim();
+
+                    }
+
+                } catch(e) {}
+
+            }
+
+
+            function __tp_dvrClear(){
+
+                try {
+
+                    for (var i = 0; i < __tp_dvrRing.length; i++) {
+
+                        try {
+                            URL.revokeObjectURL(
+                                __tp_dvrRing[i].url
+                            );
+                        } catch(e) {}
+
+                    }
+
+                } catch(e) {}
+
+                __tp_dvrRing = [];
+                __tp_dvrDurations = {};
+                __tp_dvrTotal = 0;
+
+                if (__tp_bc) {
+
+                    try {
+
+                        __tp_bc.postMessage({
+                            type: "dvrDrop",
+                            tabId: __tp_tabId,
+                            clear: true
+                        });
+
+                    } catch(e) {}
+
+                }
+
+            }
+
+
+            // Renvoie le nombre de segments retirés en tête, que
+            // la page applique à sa propre liste pour rester
+            // alignée sans qu'on ait à la lui renvoyer entière.
+            // Annonce systématiquement ce qu'elle retire : la page
+            // tient la même liste, et une seule expiration passée
+            // sous silence lui laisse des URL de Blob révoquées.
+            function __tp_dvrTrim(){
+
+                // Pendant la lecture du passé on laisse gonfler,
+                // mais pas indéfiniment : deux fois la profondeur
+                // réglée reste un plafond connu.
+                var limit = __tp_dvrHold
+                    ? __tp_dvrSpan * 2
+                    : __tp_dvrSpan;
+
+                var dropped = 0;
+
+                while (
+                    __tp_dvrRing.length > 1 &&
+                    __tp_dvrTotal > limit
+                ) {
+
+                    var gone = __tp_dvrRing.shift();
+
+                    __tp_dvrTotal -= gone.dur;
+
+                    try {
+                        URL.revokeObjectURL(gone.url);
+                    } catch(e) {}
+
+                    dropped++;
+
+                }
+
+                if (dropped && __tp_bc) {
+
+                    try {
+
+                        __tp_bc.postMessage({
+                            type: "dvrDrop",
+                            tabId: __tp_tabId,
+                            count: dropped
+                        });
+
+                    } catch(e) {}
+
+                }
+
+                return dropped;
+
+            }
+
+
+            // Un segment ne porte pas sa durée : elle est dans le
+            // playlist média qui vient de le référencer. On garde
+            // la table à taille bornée, sinon elle fuit sur un
+            // stream de plusieurs heures.
+            function __tp_dvrNotePlaylist(url, text){
+
+                try {
+
+                    // #EXT-X-MAP = flux fMP4 : les segments ne se
+                    // suffisent pas a eux-memes, il leur faut un
+                    // segment d'initialisation. On refuse plutot
+                    // que de reconstruire un flux injouable.
+                    if (text.indexOf("#EXT-X-MAP") >= 0) {
+
+                        if (!__tp_dvrUnsupported) {
+
+                            __tp_dvrUnsupported = true;
+
+                            __tp_dvrClear();
+
+                            if (__tp_bc) {
+
+                                try {
+
+                                    __tp_bc.postMessage({
+                                        type: "dvrUnsupported",
+                                        tabId: __tp_tabId,
+                                        channel: __tp_lastChannel
+                                    });
+
+                                } catch(e) {}
+
+                            }
+
+                        }
+
+                        return;
+
+                    }
+
+                    var rows = text.split("\\n");
+                    var pending = 0;
+
+                    for (var i = 0; i < rows.length; i++) {
+
+                        var row = rows[i].trim();
+
+                        if (!row) {
+                            continue;
+                        }
+
+                        if (row.indexOf("#EXTINF:") === 0) {
+
+                            pending = parseFloat(
+                                row.substring(8)
+                            ) || 0;
+
+                            continue;
+
+                        }
+
+                        if (row.charAt(0) === "#") {
+                            continue;
+                        }
+
+                        if (pending > 0) {
+
+                            var abs = row;
+
+                            try {
+                                abs = new URL(row, url).href;
+                            } catch(e) {}
+
+                            __tp_dvrDurations[abs] = pending;
+
+                        }
+
+                        pending = 0;
+
+                    }
+
+                    var keys = Object.keys(__tp_dvrDurations);
+
+                    if (keys.length > 900) {
+
+                        for (var k = 0; k < keys.length - 600; k++) {
+                            delete __tp_dvrDurations[keys[k]];
+                        }
+
+                    }
+
+                } catch(e) {}
+
+            }
+
+
+            function __tp_dvrVariant(url){
+
+                try {
+
+                    var parts =
+                        url.split("?")[0].split("/");
+
+                    parts.pop();
+
+                    return parts.pop() || "";
+
+                } catch(e) {
+
+                    return "";
+
+                }
+
+            }
+
+
+            function __tp_dvrCapture(url, response){
+
+                if (!__tp_dvrActive()) {
+                    return;
+                }
+
+                // Le numéro est pris MAINTENANT, pas à la
+                // résolution du blob : deux segments peuvent se
+                // terminer dans le désordre, et un DVR dans le
+                // désordre ne vaut rien.
+                var seq = ++__tp_dvrSeq;
+
+                var channel = __tp_lastChannel;
+
+                try {
+
+                    response
+                        .clone()
+                        .blob()
+                        .then(function(blob){
+
+                            var blobUrl = null;
+
+                            try {
+
+                                blobUrl =
+                                    URL.createObjectURL(blob);
+
+                            } catch(e) {
+
+                                __tp_dvrBlobOk = false;
+
+                                return;
+
+                            }
+
+                            var dur =
+                                __tp_dvrDurations[url] || 2;
+
+                            var item = {
+                                url: blobUrl,
+                                dur: dur,
+                                seq: seq
+                            };
+
+                            var at = __tp_dvrRing.length;
+
+                            while (
+                                at > 0 &&
+                                __tp_dvrRing[at - 1].seq > seq
+                            ) {
+                                at--;
+                            }
+
+                            __tp_dvrRing.splice(at, 0, item);
+
+                            __tp_dvrTotal += dur;
+
+                            if (__tp_bc) {
+
+                                try {
+
+                                    __tp_bc.postMessage({
+                                        type: "dvrSegment",
+                                        tabId: __tp_tabId,
+                                        channel: channel,
+                                        url: blobUrl,
+                                        duration: dur,
+                                        seq: seq,
+                                        variant: __tp_dvrVariant(url)
+                                    });
+
+                                } catch(e) {}
+
+                            }
+
+                            // Après l'annonce du nouveau segment,
+                            // jamais avant : la page applique les
+                            // deux messages dans l'ordre reçu.
+                            __tp_dvrTrim();
+
+                        })
+                        .catch(function(){});
+
+                } catch(e) {}
+
+            }
+
+
+            __tp_dvrSyncConfig();
+
+        `);
+
+
+        // --------------------------------------------------------
         // Hook fetch
         // --------------------------------------------------------
 
@@ -19819,9 +24975,59 @@ dashboardButton.style.visibility =
                             init
                         );
 
-                    return __tp_isSegmentURL(lowerURL)
-                        ? __tp_measureResponse(__tp_passthrough)
-                        : __tp_passthrough;
+                    if (__tp_isSegmentURL(lowerURL)) {
+
+                        return __tp_measureResponse(
+                            __tp_passthrough
+                        ).then(function(response){
+
+                            __tp_dvrCapture(
+                                originalURL,
+                                response
+                            );
+
+                            return response;
+
+                        });
+
+                    }
+
+                    // Le playlist média est la seule source qui
+                    // donne la durée de chaque segment ; sans elle
+                    // le DVR ne saurait pas reconstruire un m3u8.
+                    if (
+                        __tp_dvrActive() &&
+                        lowerURL.indexOf(".m3u8") >= 0
+                    ) {
+
+                        return __tp_passthrough.then(
+                            function(response){
+
+                                try {
+
+                                    response
+                                        .clone()
+                                        .text()
+                                        .then(function(text){
+
+                                            __tp_dvrNotePlaylist(
+                                                originalURL,
+                                                text
+                                            );
+
+                                        })
+                                        .catch(function(){});
+
+                                } catch(e) {}
+
+                                return response;
+
+                            }
+                        );
+
+                    }
+
+                    return __tp_passthrough;
 
                 }
 
@@ -19878,7 +25084,20 @@ dashboardButton.style.visibility =
                 }
 
 
+                if (
+                    __tp_lastChannel &&
+                    __tp_lastChannel !== channel
+                ) {
+
+                    __tp_dvrClear();
+
+                    __tp_dvrUnsupported = false;
+
+                }
+
                 __tp_lastChannel = channel;
+
+                __tp_dvrSyncConfig();
 
 
                 var enabled =
@@ -20540,6 +25759,12 @@ dashboardButton.style.visibility =
 
         lastKnownChannel = channel;
 
+        // Le passé d'une autre chaîne n'a plus rien à faire à
+        // l'écran, et son buffer encore moins en mémoire.
+        closeDvr();
+
+        dvrResetSegments();
+
         console.log('[TwitchProxy] Changement de chaîne détecté :', channel);
 
         setTimeout(function () {
@@ -20825,6 +26050,10 @@ dashboardButton.style.visibility =
 
         // Mesure bande passante / temps de visionnage.
         setInterval(trackBandwidthAndWatchTime, BANDWIDTH_TICK_MS);
+
+        // Pause faite sur le lecteur de Twitch : on ne peut pas
+        // écouter l'élément, il est remplacé en cours de route.
+        setInterval(watchNativeTwitchPause, 1000);
 
         startAutoBackup();
 
