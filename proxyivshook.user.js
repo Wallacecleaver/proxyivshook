@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch HLS Proxy
 // @namespace    twitch-proxy-ivs
-// @version      1.8.8
+// @version      1.8.9
 // @author       razeNFR
 // @description  Twitch HLS via plusieurs proxys - Dashboard statistiques (nouvel onglet, design amélioré) + fallback automatique + résultats persistants + proxys personnalisés
 // @match        https://www.twitch.tv/*
@@ -33,7 +33,7 @@
         Math.random().toString(36).substring(2, 9);
 
     // Doit être tenu à jour avec le @version de l'en-tête du script.
-    var CURRENT_VERSION = '1.8.8';
+    var CURRENT_VERSION = '1.8.9';
 
     // Même URL que @updateURL : contient toujours la dernière version
     // publiée. On la relit nous-même (plutôt que de compter sur le
@@ -4822,6 +4822,25 @@
 
                     }
 
+                    // Le Worker vient d'effacer un repère de pub : on
+                    // surveille le lecteur de Twitch jusqu'après la fin
+                    // de la coupure.
+                    if (
+                        event.data &&
+                        event.data.type === 'adCleaned' &&
+                        event.data.tabId === TAB_ID
+                    ) {
+                        adCleanWatchStart(event.data.channel, event.data.detail);
+                    }
+
+                    if (
+                        event.data &&
+                        event.data.type === 'adBreakEnd' &&
+                        event.data.tabId === TAB_ID
+                    ) {
+                        adCleanWatchEnd(event.data.channel, event.data.seconds);
+                    }
+
                     // Pub repérée dans le flux par le Worker.
                     if (
                         event.data &&
@@ -4831,9 +4850,12 @@
 
                         lastStreamAdAt = Date.now();
 
-                        logEvent('error', event.data.msg || 'Pub détectée');
+                        logEvent('warn', event.data.msg || 'Pub détectée');
 
-                        adRescue(event.data.channel);
+                        // Plus de changement de proxy (adRescue) : tous
+                        // les proxys reçoivent le même repère de Twitch.
+                        // Le Worker l'efface du flux à la place, voir
+                        // __tp_cleanAds.
 
                     }
 
@@ -8859,6 +8881,8 @@ function showAddProxyForm() {
         }
         .tp9dvr-native-bar .tp9dvr-zone-vod { background: #9147ff; }
         .tp9dvr-native-bar .tp9dvr-head { width: 12px; height: 12px; margin-left: -6px; border-radius: 50%; }
+        /* Calque de Twitch posé sur le passé : voir dvrCoverScan. */
+        [data-tp9-cover] { visibility: hidden !important; opacity: 0 !important; }
 `;
 
 
@@ -9792,6 +9816,12 @@ function showAddProxyForm() {
 
 
     var dvrRecoverTries = 0;
+
+    // Mode prudent : un seul codec gardé et chargement lancé à la main.
+    // Il ne s'allume qu'après un refus de codec par le navigateur ; le
+    // reste du temps, hls.js choisit seul sa qualité, comme avant la PR
+    // (un membre sur Brave n'avait alors aucun écran noir).
+    var dvrSafeCodecs = false;
 
     // Hôte de l'adresse en échec, pour le journal : « bloqué par le
     // navigateur » et « refusé par Twitch » ne visent pas le même.
@@ -10843,6 +10873,8 @@ function showAddProxyForm() {
 
         dvrDestroyPlayback();
 
+        dvrUncoverPicture();
+
         dvrSendHold(false);
 
         try {
@@ -10977,6 +11009,7 @@ function showAddProxyForm() {
         dvrDestroyPlayback();
 
         dvrRestoreNativeControls();
+        dvrUncoverPicture();
         dvrSourceKind = 'live';
 
         // Revenir au direct annule le gel : on y est, il n'y a plus
@@ -12147,9 +12180,247 @@ function showAddProxyForm() {
             'error',
             'Twitch affiche une pub dans le lecteur (' + channel + ') · ' + source + ' · ' +
             (inStream
-                ? 'la pub est bien dans le flux vidéo'
+                ? 'le repère de pub avait été effacé du flux, Twitch l\'affiche quand même : le nettoyage ne suffit pas'
                 : 'aucune pub dans le flux vidéo : pub ajoutée par la page Twitch')
         );
+    }
+
+    // ------------------------------------------------------------
+    // Surveillance du lecteur après un nettoyage de pub
+    // ------------------------------------------------------------
+    //
+    // Effacer le repère de pub marche sur certaines chaînes (aucune
+    // pub, lecture normale) et en bloque d'autres : le lecteur de
+    // Twitch attend une fin de pub qui ne vient jamais → « hors
+    // ligne », puis image figée même après un F5. Pendant la coupure
+    // et 30 s après, on regarde le lecteur ; au premier blocage, on
+    // coupe le nettoyage sur cette chaîne (30 min, gardé au F5) et on
+    // relance le lecteur. Chaque étape laisse une ligne dans les Logs.
+    var AD_CLEAN_OFF_MS = 30 * 60 * 1000;
+    var adCleanWatch = null;
+
+    function loadAdCleanOff() {
+        var map = {};
+        try {
+            map = JSON.parse(localStorage.getItem('twitchProxyAdCleanOff') || '{}') || {};
+        } catch (e) {
+            map = {};
+        }
+        var now = Date.now();
+        Object.keys(map).forEach(function (channel) {
+            if (!(map[channel] > now)) {
+                delete map[channel];
+            }
+        });
+        return map;
+    }
+
+    function setAdCleanOff(channel) {
+        var map = loadAdCleanOff();
+        map[channel] = Date.now() + 30 * 60 * 1000;
+        try {
+            localStorage.setItem('twitchProxyAdCleanOff', JSON.stringify(map));
+        } catch (e) {}
+        if (configChannel) {
+            try {
+                configChannel.postMessage({ type: 'adCleanOff', map: map });
+            } catch (e) {}
+        }
+    }
+
+    function adCleanWatchStart(channel, detail) {
+        if (!channel) {
+            return;
+        }
+        adCleanWatch = {
+            channel: channel,
+            detail: detail || '',
+            since: Date.now(),
+            endedAt: 0,
+            seconds: 0,
+            lastTime: null,
+            lastMove: Date.now(),
+            noVideoSince: 0,
+            emptySince: 0,
+            pausedLogged: false,
+            overlaySeen: false
+        };
+    }
+
+    function adCleanWatchEnd(channel, seconds) {
+        if (adCleanWatch && adCleanWatch.channel === channel) {
+            adCleanWatch.endedAt = Date.now();
+            adCleanWatch.seconds = seconds || 0;
+        }
+    }
+
+    function adCleanVideoState(video) {
+        if (!video) {
+            return 'aucune vidéo dans la page';
+        }
+        var ahead = 0;
+        try {
+            for (var i = 0; i < video.buffered.length; i++) {
+                if (
+                    video.buffered.start(i) <= video.currentTime + 0.5 &&
+                    video.buffered.end(i) > video.currentTime
+                ) {
+                    ahead = video.buffered.end(i) - video.currentTime;
+                }
+            }
+        } catch (e) {}
+        return 'vidéo ' + (video.paused ? 'en pause' : 'en lecture') +
+            ' · état ' + video.readyState + '/4' +
+            ' · réseau ' + video.networkState +
+            ' · avance chargée ' + ahead.toFixed(1) + ' s' +
+            (video.error ? ' · erreur vidéo code ' + video.error.code : '');
+    }
+
+    // Écran « hors ligne » de Twitch dans le cadre du lecteur. Texte
+    // cherché faute de sélecteur connu (non vérifié sur le vrai Twitch).
+    function adCleanOfflineShown(video) {
+        try {
+            var box = video
+                ? video.closest('[data-a-target="video-player"], .video-player')
+                : document.querySelector('[data-a-target="video-player"], .video-player');
+            return !!(box && /hors ligne|\boffline\b/i.test(box.innerText || ''));
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function adCleanPlaybackVideo() {
+        var video = (dvrLiveVideo && dvrLiveVideo.isConnected)
+            ? dvrLiveVideo
+            : findPlaybackVideo();
+        if (!video || isOwnPlayerVideo(video) || isMiniPlayerVideo(video)) {
+            return null;
+        }
+        return video;
+    }
+
+    function adCleanWatchTick() {
+        var w = adCleanWatch;
+        if (!w || isDashboardOnlyTab) {
+            return;
+        }
+        var now = Date.now();
+        if (getWatchedChannel() !== w.channel) {
+            adCleanWatch = null;
+            return;
+        }
+        try {
+            if (document.querySelector(TWITCH_AD_OVERLAY)) {
+                w.overlaySeen = true;
+            }
+        } catch (e) {}
+        if (
+            (w.endedAt && (now - w.endedAt) > 30000) ||
+            (now - w.since) > 5 * 60 * 1000
+        ) {
+            adCleanWatch = null;
+            logEvent(
+                w.overlaySeen ? 'warn' : 'success',
+                'Coupure pub sur ' + w.channel +
+                (w.seconds ? ' (environ ' + w.seconds + ' s)' : '') +
+                ' passée sans blocage du lecteur · ' +
+                (w.overlaySeen
+                    ? 'Twitch a quand même affiché sa pub'
+                    : 'aucune pub affichée par Twitch') +
+                (w.pausedLogged ? ' · la vidéo a été en pause pendant la coupure' : '')
+            );
+            return;
+        }
+        if (document.visibilityState !== 'visible') {
+            return;
+        }
+        if (dvrOverlay && (!dvrIsLive() || dvrIsLivePaused())) {
+            return;
+        }
+        var video = adCleanPlaybackVideo();
+        var reason = null;
+        if (!video) {
+            if (!w.noVideoSince) {
+                w.noVideoSince = now;
+            } else if ((now - w.noVideoSince) >= 4000) {
+                reason = 'la vidéo du lecteur Twitch a disparu';
+            }
+        } else {
+            w.noVideoSince = 0;
+            if (video.error) {
+                reason = 'erreur du lecteur Twitch (code ' + video.error.code + ')';
+            } else if (video.ended) {
+                reason = 'le lecteur Twitch croit le stream terminé';
+            } else if (adCleanOfflineShown(video)) {
+                reason = 'Twitch affiche « hors ligne »';
+            } else if (video.paused) {
+                if (video.readyState < 2) {
+                    if (!w.emptySince) {
+                        w.emptySince = now;
+                    } else if ((now - w.emptySince) >= 8000) {
+                        reason = 'chargement sans fin (vidéo vide depuis ' +
+                            Math.round((now - w.emptySince) / 1000) + ' s)';
+                    }
+                } else {
+                    w.emptySince = 0;
+                }
+                if (!w.pausedLogged) {
+                    w.pausedLogged = true;
+                    logEvent(
+                        'info',
+                        'Vidéo en pause pendant la coupure pub sur ' + w.channel +
+                        ' (' + adCleanVideoState(video) + ')'
+                    );
+                }
+            } else {
+                w.emptySince = 0;
+                if (video.currentTime !== w.lastTime) {
+                    w.lastTime = video.currentTime;
+                    w.lastMove = now;
+                } else if ((now - w.lastMove) >= 6000) {
+                    reason = 'image figée depuis ' +
+                        Math.round((now - w.lastMove) / 1000) + ' s';
+                }
+            }
+        }
+        if (reason) {
+            adCleanFailed(reason);
+        }
+    }
+
+    function adCleanFailed(reason) {
+        var w = adCleanWatch;
+        if (!w) {
+            return;
+        }
+        adCleanWatch = null;
+        var now = Date.now();
+        logEvent(
+            'error',
+            'Le nettoyage de pub a bloqué le lecteur Twitch sur ' + w.channel +
+            ' : ' + reason +
+            ' · ' + Math.round((now - w.since) / 1000) + ' s après le début de la coupure' +
+            (w.endedAt
+                ? ', ' + Math.round((now - w.endedAt) / 1000) + ' s après sa fin'
+                : ', coupure encore en cours') +
+            ' · ' + adCleanVideoState(adCleanPlaybackVideo()) +
+            (w.detail ? ' · repère effacé : ' + w.detail : '') +
+            ' → nettoyage coupé ' + (AD_CLEAN_OFF_MS / 60000) +
+            ' min sur cette chaîne, relance du lecteur'
+        );
+        setAdCleanOff(w.channel);
+        watchdogLastRescue = now;
+        if (!reloadTwitchPlayer()) {
+            logEvent('error', 'Relance du lecteur impossible sur ' + w.channel + ' : recharge la page (F5)');
+            return;
+        }
+        showToast({
+            icon: '🔄',
+            title: 'Lecture relancée',
+            text: 'Le nettoyage des pubs a bloqué le lecteur : il est coupé 30 min sur cette chaîne.',
+            ok: true,
+            duration: 6000
+        });
     }
 
     function watchdogTick() {
@@ -12211,6 +12482,10 @@ function showAddProxyForm() {
     }
 
     function watchdogRescue(channel) {
+        if (adCleanWatch && adCleanWatch.channel === channel) {
+            adCleanFailed('image figée depuis ' + (WATCHDOG_STALL_MS / 1000) + ' s (chien de garde)');
+            return;
+        }
         var now = Date.now();
         watchdogRescues = watchdogRescues.filter(function (at) {
             return (now - at) < WATCHDOG_WINDOW_MS;
@@ -12279,13 +12554,10 @@ function showAddProxyForm() {
     // Le proxy protège le début du stream, pas toujours les pubs de
     // milieu de stream : Twitch les colle directement dans la vidéo.
     // Quand le Worker en voit une, le proxy utilisé est écarté 5 min
-    // et le lecteur relancé, ce qui refait la course sans lui. Deux
-    // essais par tranche de 3 min et par chaîne, pas plus : si Twitch
-    // en met partout, relancer en boucle ne ferait que couper l'image.
-    var AD_RESCUE_MAX = 2;
-    var AD_RESCUE_WINDOW_MS = 3 * 60 * 1000;
-    var adRescues = [];
-    var adRescueChannel = null;
+    // et le lecteur relancé, ce qui refait la course sans lui. Chaque
+    // proxy écarté le reste 5 min : on les essaie donc tous une fois,
+    // puis on laisse passer la pub quand il n'en reste plus.
+    var adRescueGaveUp = null;
 
     function adRescue(channel) {
         if (isDashboardOnlyTab || !channel || channel !== getTestChannel()) {
@@ -12304,35 +12576,29 @@ function showAddProxyForm() {
             return;
         }
         var now = Date.now();
-        if (channel !== adRescueChannel) {
-            adRescueChannel = channel;
-            adRescues = [];
-        }
-        adRescues = adRescues.filter(function (at) {
-            return (now - at) < AD_RESCUE_WINDOW_MS;
-        });
-        if (adRescues.length >= AD_RESCUE_MAX) {
-            logEvent(
-                'warn',
-                'Pub toujours là sur ' + channel + ' après ' + AD_RESCUE_MAX +
-                ' changements de proxy : on la laisse passer'
-            );
-            return;
-        }
         var proxy = pageConfig.proxies.find(function (p) {
             return p.id === activeProxyInfo.proxyId;
         });
         if (!proxy) {
             return;
         }
-        // Aucun autre proxy en course : relancer reviendrait au même.
+        // Tous les autres déjà essayés : relancer reviendrait au même.
         var others = getRaceableProxies().filter(function (p) {
             return p.id !== proxy.id && !(p.stallSkipUntil > now);
         });
         if (!others.length) {
+            // Un seul message par coupure, pas un à chaque relecture.
+            if (!adRescueGaveUp || adRescueGaveUp.channel !== channel ||
+                (now - adRescueGaveUp.at) > WATCHDOG_SKIP_MS) {
+                adRescueGaveUp = { channel: channel, at: now };
+                logEvent(
+                    'warn',
+                    'Pub toujours là sur ' + channel +
+                    ' : tous les proxys ont été essayés, on la laisse passer'
+                );
+            }
             return;
         }
-        adRescues.push(now);
         proxy.stallSkipUntil = now + WATCHDOG_SKIP_MS;
         broadcastConfig();
         logEvent(
@@ -12815,10 +13081,9 @@ function showAddProxyForm() {
             lowLatencyMode: false,
             backBufferLength: 90,
 
-            // Le chargement ne part qu'une fois les rendus triés (voir
-            // dvrKeepOneCodec) : hls.js commencerait sinon sur un rendu
-            // qu'on retire juste après.
-            autoStartLoad: false
+            // En mode prudent seulement, le chargement attend que les
+            // rendus soient triés (voir dvrKeepOneCodec).
+            autoStartLoad: !dvrSafeCodecs
         };
 
         if (kind === 'buffer') {
@@ -12910,14 +13175,22 @@ function showAddProxyForm() {
 
                 dvrSetStatus('');
 
-                dvrKeepOneCodec();
+                // Comme avant la PR : hls.js choisit seul sa qualité. On
+                // n'impose que celle choisie à la main dans le menu de
+                // Twitch, et on ne trie les codecs qu'en mode prudent.
+                if (dvrSafeCodecs) {
+                    dvrKeepOneCodec();
+                }
 
-                // Keep Twitch's selected quality when rewind changes source.
-                dvrUseTwitchQuality(dvrRequestedQuality);
+                if (!/^auto$/i.test(dvrRequestedQuality)) {
+                    dvrUseTwitchQuality(dvrRequestedQuality);
+                }
 
-                try {
-                    dvrHls.startLoad();
-                } catch (e) {}
+                if (dvrSafeCodecs) {
+                    try {
+                        dvrHls.startLoad();
+                    } catch (e) {}
+                }
 
                 // Le dernier retard demandé, et non celui qui a
                 // déclenché ce chargement : un second clic sur ⟲30
@@ -13037,6 +13310,24 @@ function showAddProxyForm() {
                 // on le condamne définitivement plutôt que de le
                 // reproposer à la prochaine expiration du cache.
                 if (dvrSourceKind === 'vod') {
+
+                    // Codec refusé en accès normal : on recharge le même
+                    // VOD en mode prudent (un seul codec, le H.264).
+                    if (
+                        /codec/i.test(data.details || '') &&
+                        !dvrSafeCodecs &&
+                        dvrVodRenditionLabel() === ' · accès normal'
+                    ) {
+                        var codecOffset = dvrCurrentOffset() || offset;
+                        dvrSafeCodecs = true;
+                        logEvent(
+                            'info',
+                            'Retour arrière : le navigateur refuse un des formats vidéo du VOD, nouvel essai en ne gardant que le H.264'
+                        );
+                        dvrDestroyPlayback();
+                        dvrLoadSource('vod', codecOffset);
+                        return;
+                    }
 
                     // Le rendu « source » (chunked) de certains VOD est en
                     // HEVC, que hls.js ne sait pas lire : on passe au
@@ -14869,6 +15160,220 @@ function showAddProxyForm() {
         );
         dvrJump = null;
         dvrStallReset();
+        dvrWatchJumpPicture();
+    }
+
+    // « Image revenue » veut seulement dire que la vidéo a de quoi
+    // jouer, pas qu'on voit quelque chose : sur Brave, un membre avait
+    // un écran noir avec des sauts tous réussis. 1,5 s après le saut,
+    // on vérifie que des images sont vraiment décodées et que notre
+    // vidéo est à l'écran, et on le dit dans les Logs sinon.
+    var dvrPictureTimer = 0;
+
+    function dvrDecodedFrames() {
+        try {
+            if (dvrVideo.getVideoPlaybackQuality) {
+                return dvrVideo.getVideoPlaybackQuality().totalVideoFrames;
+            }
+            if (typeof dvrVideo.webkitDecodedFrameCount === 'number') {
+                return dvrVideo.webkitDecodedFrameCount;
+            }
+        } catch (e) {}
+        return -1;
+    }
+
+    function dvrLevelSummary() {
+        try {
+            if (!dvrHls) return 'qualité inconnue';
+            var levels = dvrQualityLevels();
+            var level = levels[dvrHls.currentLevel];
+            return 'qualité ' + (dvrHls.autoLevelEnabled ? 'Auto' : 'fixée') +
+                (level
+                    ? ' (' + dvrLevelName(level) + ', codec ' +
+                        (level.videoCodec || '?') + ')'
+                    : '');
+        } catch (e) {
+            return 'qualité inconnue';
+        }
+    }
+
+    // Ce qui est dessiné au centre de notre vidéo, du dessus vers le
+    // dessous. Notre calque laisse passer la souris, et le navigateur
+    // ne « voit » alors pas notre vidéo à cet endroit : on la rend
+    // touchable le temps de la mesure.
+    function dvrStackAtCenter() {
+        var rect = dvrVideo.getBoundingClientRect();
+        if (rect.width < 10 || rect.height < 10 || !document.elementsFromPoint) return null;
+        var previous = dvrVideo.style.pointerEvents;
+        dvrVideo.style.pointerEvents = 'auto';
+        var stack = [];
+        try {
+            stack = document.elementsFromPoint(
+                rect.left + rect.width / 2,
+                rect.top + rect.height / 2
+            );
+        } catch (e) {}
+        dvrVideo.style.pointerEvents = previous;
+        return { stack: stack, at: stack.indexOf(dvrVideo) };
+    }
+
+    function dvrDescribeElement(el) {
+        var tag = el.tagName.toLowerCase();
+        var target = el.getAttribute('data-a-target') || el.getAttribute('data-test-selector');
+        if (target) return tag + ' « ' + target + ' »';
+        var cls = typeof el.className === 'string' ? el.className.trim().split(/\s+/)[0] : '';
+        return cls ? tag + '.' + cls : tag;
+    }
+
+    // Opaque : une image (vidéo, pub, iframe) ou un fond presque plein.
+    // Un calque transparent (la zone cliquable de Twitch) ne cache rien.
+    function dvrIsOpaque(el) {
+        if (/^(VIDEO|CANVAS|IFRAME|IMG)$/.test(el.tagName)) return true;
+        try {
+            var style = getComputedStyle(el);
+            if (parseFloat(style.opacity) < 0.5 || style.visibility === 'hidden') return false;
+            var bg = style.backgroundColor.match(/rgba?\(([^)]+)\)/);
+            if (!bg) return false;
+            var parts = bg[1].split(',');
+            return (parts.length > 3 ? parseFloat(parts[3]) : 1) >= 0.5;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    // Jamais masqué : nos propres éléments, et tout ce qui porte les
+    // commandes de Twitch (sinon la barre disparaîtrait avec).
+    function dvrIsOwnOrControls(el) {
+        return !!(
+            (dvrOverlay && dvrOverlay.contains(el)) ||
+            el.contains(dvrVideo) ||
+            el.closest(
+                '.tp9dvr-native-bar, .tp9dvr-native-info, .tp9dvr-menu, .tp9dvr-vol-hint,' +
+                '#tp9-dashboard, #tp9-toast, #tp9-tip, [data-a-target="player-controls"]'
+            ) ||
+            el.querySelector('[data-a-target="player-controls"], .tp9dvr-native-bar')
+        );
+    }
+
+    // Ce qui recouvre notre vidéo au centre de l'image, s'il y a lieu.
+    function dvrPictureCover() {
+        if (!dvrVideo.isConnected) return 'notre vidéo a été retirée de la page';
+        var rect = dvrVideo.getBoundingClientRect();
+        if (rect.width < 10 || rect.height < 10) {
+            return 'notre vidéo est réduite à ' + Math.round(rect.width) + 'x' + Math.round(rect.height);
+        }
+        var style = getComputedStyle(dvrVideo);
+        if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) < 0.1) {
+            return 'notre vidéo est masquée (' + style.display + ', ' + style.visibility + ', opacité ' + style.opacity + ')';
+        }
+        var found = dvrStackAtCenter();
+        if (!found) return null;
+        if (found.at < 0) return 'notre vidéo n\'est pas visible au centre de l\'image';
+        for (var i = 0; i < found.at; i++) {
+            var el = found.stack[i];
+            if (!dvrIsOwnOrControls(el) && dvrIsOpaque(el)) {
+                return 'recouverte par ' + dvrDescribeElement(el) +
+                    (el.tagName === 'VIDEO' ? ' (une vidéo de Twitch)' : '');
+            }
+        }
+        return null;
+    }
+
+    // ------------------------------------------------------------
+    // CE QUE TWITCH POSE PAR-DESSUS LE PASSÉ
+    // ------------------------------------------------------------
+    //
+    // Avant la PR, notre lecteur flottait au-dessus de toute la page :
+    // une pub de Twitch pouvait passer dessous sans rien cacher.
+    // Maintenant il vit DANS le lecteur de Twitch, et un calque de
+    // Twitch (sa pub, un fond noir pendant qu'il reconstruit son
+    // lecteur) peut le recouvrir : c'était l'écran noir d'un membre
+    // sur Brave. Pendant le retour arrière, tout calque opaque posé
+    // au-dessus de notre vidéo est masqué ; il revient au retour au
+    // direct.
+    var dvrCoverScanAt = 0;
+    var dvrCoverLogged = {};
+    var dvrPictureRecoveredAt = 0;
+
+    function dvrUncoverPicture() {
+        dvrCoverLogged = {};
+        Array.prototype.forEach.call(
+            document.querySelectorAll('[data-tp9-cover]'),
+            function (el) {
+                el.removeAttribute('data-tp9-cover');
+            }
+        );
+    }
+
+    function dvrCoverScan(force) {
+        if (!dvrVideo || !dvrOverlay || dvrIsLive() || dvrSwitching) return;
+        var now = Date.now();
+        if (!force && (now - dvrCoverScanAt) < 1000) return;
+        dvrCoverScanAt = now;
+        var found = dvrStackAtCenter();
+        if (!found || found.at < 0) return;
+        for (var i = 0; i < found.at; i++) {
+            var el = found.stack[i];
+            if (el.hasAttribute('data-tp9-cover') || dvrIsOwnOrControls(el) || !dvrIsOpaque(el)) continue;
+            el.setAttribute('data-tp9-cover', '');
+            var what = dvrDescribeElement(el);
+            if (dvrCoverLogged[what]) continue;
+            dvrCoverLogged[what] = true;
+            var adShown = false;
+            try {
+                adShown = !!document.querySelector(TWITCH_AD_OVERLAY);
+            } catch (e) {}
+            logEvent(
+                'warn',
+                'Retour arrière (' + dvrReplayKindLabel() + ') : Twitch posait ' + what +
+                ' par-dessus le passé' + (adShown ? ' (pendant une pub Twitch)' : '') +
+                ' → masqué le temps du retour arrière'
+            );
+        }
+    }
+
+    function dvrWatchJumpPicture() {
+        clearTimeout(dvrPictureTimer);
+        if (!dvrVideo) return;
+        var frames = dvrDecodedFrames();
+        var at = Date.now();
+        dvrPictureTimer = setTimeout(function () {
+            if (!dvrVideo || dvrIsLive() || dvrJump || dvrSwitching) return;
+            // D'abord réparer ce qui se répare : un calque de Twitch.
+            dvrCoverScan(true);
+            var problems = [];
+            var noPicture = false;
+            var now = dvrDecodedFrames();
+            if (!dvrVideo.videoWidth) {
+                noPicture = true;
+                problems.push('aucune image décodée (0x0)');
+            } else if (!dvrVideo.paused && frames >= 0 && now >= 0 && now <= frames) {
+                noPicture = true;
+                problems.push('le son avance mais aucune nouvelle image depuis ' +
+                    dvrFormatSeconds(Date.now() - at));
+            }
+            var cover = dvrPictureCover();
+            if (cover) problems.push(cover);
+            if (!problems.length) return;
+            // Des données mais aucune image : on relance le décodeur,
+            // une fois toutes les 30 s au plus.
+            var retried = false;
+            if (noPicture && dvrHls && (Date.now() - dvrPictureRecoveredAt) > 30000) {
+                dvrPictureRecoveredAt = Date.now();
+                try {
+                    dvrHls.recoverMediaError();
+                    retried = true;
+                } catch (e) {}
+            }
+            logEvent(
+                'error',
+                'Retour arrière : écran noir probable (' + dvrReplayKindLabel() + ') · ' +
+                problems.join(' · ') + ' · ' + dvrLevelSummary() +
+                (dvrVideo.videoWidth ? ' · image ' + dvrVideo.videoWidth + 'x' + dvrVideo.videoHeight : '') +
+                dvrReplayState() + dvrVodRenditionLabel() +
+                (retried ? ' · décodeur relancé' : '')
+            );
+        }, 1500);
     }
 
     // Pause qu'on n'a pas demandée. Si Twitch a sorti notre vidéo de
@@ -15099,6 +15604,8 @@ function showAddProxyForm() {
         positionDvrOverlay();
 
         dvrWatchReplay();
+
+        dvrCoverScan();
 
     }
 
@@ -29098,6 +29605,12 @@ dashboardButton.style.visibility =
         );
 
         lines.push(
+            'var __tp_adCleanOff = ' +
+            JSON.stringify(loadAdCleanOff()) +
+            ';'
+        );
+
+        lines.push(
             'var __tp_tabId = ' +
             JSON.stringify(TAB_ID) +
             ';'
@@ -29134,6 +29647,18 @@ dashboardButton.style.visibility =
                                 );
 
                                 __tp_dvrSyncConfig();
+
+                            }
+
+                            // La page a vu le lecteur de Twitch se
+                            // bloquer après un nettoyage de pub.
+                            if (
+                                event.data &&
+                                event.data.type === 'adCleanOff'
+                            ) {
+
+                                __tp_adCleanOff =
+                                    event.data.map || {};
 
                             }
 
@@ -29361,6 +29886,24 @@ dashboardButton.style.visibility =
                             response.__tp_country =
                                 country ? country[1] : null;
 
+                            // Les listes de segments que CE manifeste
+                            // annonce : une pub vue dans une autre liste
+                            // voudrait dire que le lecteur ne lit pas le
+                            // flux du proxy.
+                            var media = [];
+
+                            text.split("\\n").forEach(function(row){
+
+                                row = row.trim();
+
+                                if (row && row.charAt(0) !== "#") {
+                                    media.push(__tp_mediaKey(row));
+                                }
+
+                            });
+
+                            response.__tp_media = media;
+
                             return isHls;
 
                         })
@@ -29518,6 +30061,14 @@ dashboardButton.style.visibility =
             // rafraîchissement de la liste (toutes les 2 s).
             var __tp_adState = { inAd: false, since: 0, channel: null };
 
+            // Adresse d'une liste de segments sans ses paramètres : le
+            // lecteur peut en ajouter en la relisant.
+            function __tp_mediaKey(url){
+
+                return String(url).split("?")[0].split("#")[0];
+
+            }
+
             function __tp_adMarker(text){
 
                 if (/twitch-stitched-ad|stitched-ad/i.test(text)) {
@@ -29581,12 +30132,34 @@ dashboardButton.style.visibility =
                                             ? " (jeton " + __tp_active.country + ")"
                                             : "");
 
+                        // La preuve : la liste où la pub se trouve
+                        // fait-elle partie de celles que le proxy
+                        // gagnant a renvoyées ?
+                        var origin = "";
+
+                        if (
+                            __tp_active &&
+                            __tp_active.channel === channel &&
+                            !__tp_active.direct
+                        ) {
+
+                            var known = __tp_active.media || [];
+
+                            origin = !known.length
+                                ? " · VÉRIF : manifeste du proxy illisible, impossible de comparer"
+                                : known.indexOf(__tp_mediaKey(url)) >= 0
+                                    ? " · VÉRIF : flux bien fourni par le proxy (la pub vient de chez Twitch via le proxy)"
+                                    : " · VÉRIF : ce flux N'EST PAS celui du proxy (le lecteur lit autre chose)";
+
+                        }
+
                         var msg =
                             "Pub détectée dans le flux de " + channel +
                             (roll ? " (" + roll[1].toLowerCase() + ")" : "") +
                             " · " + source +
                             " · serveur vidéo " + host +
-                            " · repère " + marker;
+                            " · repère " + marker +
+                            origin;
 
                         console.warn("[TwitchProxy] 📺 " + msg);
 
@@ -29614,13 +30187,35 @@ dashboardButton.style.visibility =
                         var seconds =
                             Math.round((Date.now() - __tp_adState.since) / 1000);
 
+                        var cleaned = __tp_adState.cleaned || 0;
+
                         __tp_adState = { inAd: false, since: 0, channel: null };
 
                         var endMsg =
-                            "Fin de la pub sur " + channel +
-                            " (environ " + seconds + " s)";
+                            "Fin de la coupure pub sur " + channel +
+                            " (environ " + seconds + " s)" +
+                            (cleaned
+                                ? " · repère effacé " + cleaned +
+                                    " fois avant que le lecteur Twitch le lise"
+                                : "");
 
                         console.log("[TwitchProxy] 📺 " + endMsg);
+
+                        if (__tp_bc) {
+
+                            try {
+
+                                __tp_bc.postMessage({
+                                    type: "adBreakEnd",
+                                    tabId: __tp_tabId,
+                                    channel: channel,
+                                    seconds: seconds,
+                                    cleaned: cleaned
+                                });
+
+                            } catch(e) {}
+
+                        }
 
                         if (__tp_bc) {
 
@@ -29640,6 +30235,255 @@ dashboardButton.style.visibility =
                     }
 
                 } catch(e) {}
+
+            }
+
+            // ----------------------------------------------------
+            // Effacement du repère de pub
+            // ----------------------------------------------------
+            //
+            // Pendant une coupure, le serveur vidéo de Twitch glisse
+            // dans la liste de segments des lignes qui disent « pub
+            // en cours ». Le lecteur de Twitch les lit et lance alors
+            // SA pub par-dessus le direct. On les efface avant qu'il
+            // ne les voie : il ne sait plus qu'il y a une coupure.
+            //
+            // Les segments eux-mêmes sont gardés (seul leur titre est
+            // remis à « live ») : en retirer ferait sauter l'image.
+            function __tp_stripAds(text, url){
+
+                var rows = text.split("\\n");
+                var out = [];
+                var removed = 0;
+                var relabeled = 0;
+                var kinds = [];
+
+                rows.forEach(function(row){
+
+                    var line = row.trim();
+
+                    if (
+                        /^#EXT-X-DATERANGE/i.test(line) &&
+                        /stitched|twitch-ad|X-TV-TWITCH-AD/i.test(line)
+                    ) {
+                        removed++;
+                        __tp_noteAdLine(kinds, line);
+                        return;
+                    }
+
+                    if (
+                        /^#EXT-X-(SCTE35|CUE-OUT|CUE-OUT-CONT|CUE-IN)/i.test(line) ||
+                        (line.charAt(0) === "#" && /X-TV-TWITCH-AD/i.test(line))
+                    ) {
+                        removed++;
+                        __tp_noteAdLine(kinds, line);
+                        return;
+                    }
+
+                    if (
+                        /^#EXTINF:/i.test(line) &&
+                        !/,\\s*live\\s*$/i.test(line)
+                    ) {
+                        relabeled++;
+                        out.push(line.replace(/,.*$/, ",live"));
+                        return;
+                    }
+
+                    // La réponse réécrite perd son adresse : les
+                    // segments en adresse relative doivent devenir
+                    // absolus, sinon le lecteur ne les trouverait plus.
+                    if (line && line.charAt(0) !== "#") {
+
+                        try {
+                            out.push(new URL(line, url).href);
+                        } catch(e) {
+                            out.push(row);
+                        }
+
+                        return;
+
+                    }
+
+                    out.push(row);
+
+                });
+
+                return {
+                    text: out.join("\\n"),
+                    removed: removed,
+                    detail: kinds.join(" ; "),
+                    relabeled: relabeled
+                };
+
+            }
+
+            // Résumé lisible d'une ligne de pub retirée, pour les
+            // logs : sa balise, sa classe, le type de coupure, la durée.
+            function __tp_noteAdLine(kinds, line){
+
+                try {
+
+                    var tag = (line.match(/^#([A-Z0-9-]+)/i) || [])[1] || "?";
+                    var bits = [tag];
+
+                    [
+                        ["CLASS", "classe"],
+                        ["X-TV-TWITCH-AD-ROLL-TYPE", "type"],
+                        ["PLANNED-DURATION", "durée prévue"],
+                        ["DURATION", "durée"]
+                    ].forEach(function(pair){
+
+                        var m = line.match(
+                            new RegExp("[,:]" + pair[0] + '="?([^",]+)', "i")
+                        );
+
+                        if (m) {
+                            bits.push(pair[1] + " " + m[1]);
+                        }
+
+                    });
+
+                    var text = bits.join(" ");
+
+                    if (kinds.indexOf(text) < 0 && kinds.length < 4) {
+                        kinds.push(text);
+                    }
+
+                } catch(e) {}
+
+            }
+
+            function __tp_cleanOffFor(channel){
+
+                try {
+
+                    return !!(
+                        channel &&
+                        __tp_adCleanOff &&
+                        __tp_adCleanOff[channel] > Date.now()
+                    );
+
+                } catch(e) {
+
+                    return false;
+
+                }
+
+            }
+
+            function __tp_cleanAds(url, response){
+
+                try {
+
+                    return response
+                        .clone()
+                        .text()
+                        .then(function(text){
+
+                            __tp_checkAds(url, text);
+
+                            if (
+                                text.indexOf("#EXTINF") < 0 ||
+                                !__tp_adMarker(text)
+                            ) {
+                                return response;
+                            }
+
+                            // Le nettoyage a déjà bloqué le lecteur sur
+                            // cette chaîne : on laisse Twitch gérer sa pub.
+                            if (__tp_cleanOffFor(__tp_lastChannel)) {
+
+                                if (!__tp_adState.skipLogged && __tp_bc) {
+
+                                    __tp_adState.skipLogged = true;
+
+                                    try {
+
+                                        __tp_bc.postMessage({
+                                            type: "log",
+                                            tabId: __tp_tabId,
+                                            level: "warn",
+                                            msg: "Repère de pub LAISSÉ dans le flux de " +
+                                                __tp_lastChannel +
+                                                " : le nettoyage y est coupé (il avait bloqué le lecteur Twitch), Twitch peut afficher sa pub"
+                                        });
+
+                                    } catch(e) {}
+
+                                }
+
+                                return response;
+
+                            }
+
+                            var result = __tp_stripAds(text, url);
+
+                            __tp_adState.cleaned =
+                                (__tp_adState.cleaned || 0) + 1;
+
+                            // Une ligne par coupure, pas une à chaque
+                            // relecture de la liste (toutes les 2 s).
+                            if (__tp_adState.cleaned === 1 && __tp_bc) {
+
+                                __tp_adState.detail = result.detail;
+
+                                try {
+
+                                    __tp_bc.postMessage({
+                                        type: "adCleaned",
+                                        tabId: __tp_tabId,
+                                        channel: __tp_lastChannel,
+                                        detail: result.detail
+                                    });
+
+                                } catch(e) {}
+
+                                try {
+
+                                    __tp_bc.postMessage({
+                                        type: "log",
+                                        tabId: __tp_tabId,
+                                        level: "success",
+                                        msg: "Repère de pub effacé du flux de " +
+                                            __tp_lastChannel +
+                                            " avant que le lecteur Twitch le lise (" +
+                                            result.removed + " ligne(s) retirée(s)" +
+                                            (result.relabeled
+                                                ? ", " + result.relabeled +
+                                                    " segment(s) marqué(s) pub renommé(s) : si une pub apparaît SANS badge, c'est qu'elle était dans la vidéo elle-même"
+                                                : ", aucun segment de pub dans la vidéo") +
+                                            ")" +
+                                            (result.detail
+                                                ? " · lignes : " + result.detail
+                                                : "")
+                                    });
+
+                                } catch(e) {}
+
+                            }
+
+                            var headers = new Headers(response.headers);
+
+                            headers.delete("content-length");
+
+                            return new Response(result.text, {
+                                status: response.status,
+                                statusText: response.statusText,
+                                headers: headers
+                            });
+
+                        })
+                        .catch(function(){
+
+                            return response;
+
+                        });
+
+                } catch(e) {
+
+                    return Promise.resolve(response);
+
+                }
 
             }
 
@@ -30371,21 +31215,7 @@ dashboardButton.style.visibility =
                         __tp_passthrough = __tp_passthrough.then(
                             function(response){
 
-                                try {
-
-                                    response
-                                        .clone()
-                                        .text()
-                                        .then(function(text){
-
-                                            __tp_checkAds(originalURL, text);
-
-                                        })
-                                        .catch(function(){});
-
-                                } catch(e) {}
-
-                                return response;
+                                return __tp_cleanAds(originalURL, response);
 
                             }
                         );
@@ -30756,7 +31586,8 @@ dashboardButton.style.visibility =
                                                 channel: channel,
                                                 proxyName: proxy.name,
                                                 direct: false,
-                                                country: response.__tp_country || null
+                                                country: response.__tp_country || null,
+                                                media: response.__tp_media || []
                                             };
 
                                             if (__tp_bc) {
@@ -31549,6 +32380,7 @@ dashboardButton.style.visibility =
         startTwitchUIHider();
         setInterval(watchdogTick, 1000);
         setInterval(detectTwitchAdOverlay, 1000);
+        setInterval(adCleanWatchTick, 1000);
 
         var observer =
             new MutationObserver(
