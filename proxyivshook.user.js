@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Twitch Guard
+// @name         Twitch HLS Proxy
 // @namespace    twitch-proxy-ivs
 // @version      1.9.0
 // @author       razeNFR
