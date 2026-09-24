@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch HLS Proxy
 // @namespace    twitch-proxy-ivs
-// @version      1.9.0
+// @version      1.9.1
 // @author       razeNFR
 // @description  Twitch Guard : bloque les pubs Twitch (via proxys ou en mode Adblock sans proxy), retour arrière dans le direct et dashboard de statistiques
 // @match        https://www.twitch.tv/*
@@ -33,7 +33,7 @@
         Math.random().toString(36).substring(2, 9);
 
     // Doit être tenu à jour avec le @version de l'en-tête du script.
-    var CURRENT_VERSION = '1.9.0';
+    var CURRENT_VERSION = '1.9.1';
 
     // Même URL que @updateURL : contient toujours la dernière version
     // publiée. On la relit nous-même (plutôt que de compter sur le
@@ -32912,11 +32912,13 @@ dashboardButton.style.visibility =
                         quality: backup.text ? info.backupLabel : ""
                     });
                 } else if (info.inAd) {
-                    // Lecteur passé en H.264 pour la pub : il faut le
-                    // relancer pour retrouver la 2K/4K. Sinon une simple
-                    // pause/lecture suffit à reprendre le flux normal,
-                    // sans écran noir.
-                    var needReload = info.usingModified;
+                    // Relance complète, comme Vaft : les morceaux servis
+                    // pendant la pub n'ont pas tout à fait la même durée
+                    // de son et d'image que le stream, et une simple
+                    // pause/lecture laissait le décalage jusqu'au F5.
+                    // La relance remet tout à zéro (et rend la 2K/4K si
+                    // le lecteur était passé en H.264).
+                    var wasModified = info.usingModified;
                     info.inAd = false;
                     info.stripping = false;
                     info.stripped = 0;
@@ -32926,9 +32928,9 @@ dashboardButton.style.visibility =
                     __tp_postLog("info",
                         "🛡️ Fin de la pub sur " + info.channel + " (" +
                         Math.round((Date.now() - info.adStart) / 1000) + " s) : " +
-                        (needReload ? "relance du lecteur (retour en 2K/4K)" : "reprise du flux normal"));
+                        "relance du lecteur" + (wasModified ? " (retour en 2K/4K)" : ""));
                     __sp_post({ type: "spAd", channel: info.channel, active: false, stripping: false });
-                    __sp_post({ type: "spPlayer", action: needReload ? "reload" : "resume" });
+                    __sp_post({ type: "spPlayer", action: "reload" });
                 }
                 return text;
             }
