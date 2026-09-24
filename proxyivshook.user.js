@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch HLS Proxy
 // @namespace    twitch-proxy-ivs
-// @version      1.9.1
+// @version      1.9.2
 // @author       razeNFR
 // @description  Twitch Guard : bloque les pubs Twitch (via proxys ou en mode Adblock sans proxy), retour arrière dans le direct et dashboard de statistiques
 // @match        https://www.twitch.tv/*
@@ -33,7 +33,7 @@
         Math.random().toString(36).substring(2, 9);
 
     // Doit être tenu à jour avec le @version de l'en-tête du script.
-    var CURRENT_VERSION = '1.9.1';
+    var CURRENT_VERSION = '1.9.2';
 
     // Même URL que @updateURL : contient toujours la dernière version
     // publiée. On la relit nous-même (plutôt que de compter sur le
@@ -4572,46 +4572,108 @@
                 return;
             }
 
-            Object.defineProperty(document, 'hidden', {
-                configurable: true,
-                get: function () {
+            // Comme Vaft : Twitch ne doit JAMAIS apprendre que
+            // l'onglet est caché, sous aucun nom. Il lit aussi les
+            // variantes préfixées (webkitHidden…), et s'il s'en
+            // aperçoit il ne relance pas son lecteur après une pub
+            // tant qu'on n'est pas revenu sur l'onglet.
+            //
+            // Forcé en mode Adblock, quelle que soit l'option : c'est
+            // ce qui laisse la relance de fin de pub se faire en
+            // arrière-plan.
+            var spoofVisibility = function () {
+                return !!pageConfig.keepQualityInBackground ||
+                    pageConfig.proxiesEnabled === false;
+            };
 
-                    if (pageConfig.keepQualityInBackground) {
-                        return false;
-                    }
+            var fakeValues = {
+                hidden: false,
+                webkitHidden: false,
+                mozHidden: false,
+                visibilityState: 'visible',
+                webkitVisibilityState: 'visible'
+            };
 
-                    return hiddenDescriptor.get.call(document);
+            Object.keys(fakeValues).forEach(function (name) {
 
+                var real = Object.getOwnPropertyDescriptor(
+                    Document.prototype,
+                    name
+                );
+
+                if (!real || !real.get) {
+                    return;
                 }
+
+                Object.defineProperty(document, name, {
+                    configurable: true,
+                    get: function () {
+
+                        return spoofVisibility()
+                            ? fakeValues[name]
+                            : real.get.call(document);
+
+                    }
+                });
+
             });
 
-            Object.defineProperty(document, 'visibilityState', {
-                configurable: true,
-                get: function () {
+            // Chrome met en pause une vidéo muette laissée en
+            // arrière-plan : au retour sur l'onglet, on la relance si
+            // elle tournait avant (même garde-fou que Vaft).
+            var wasVideoPlaying = true;
 
-                    if (pageConfig.keepQualityInBackground) {
-                        return 'visible';
-                    }
+            // Enregistré au tout début (document-start) : bloque les
+            // écouteurs posés plus tard par Twitch, sous les trois
+            // noms que l'événement a portés selon les navigateurs.
+            ['visibilitychange', 'webkitvisibilitychange', 'mozvisibilitychange']
+                .forEach(function (type) {
 
-                    return visibilityStateDescriptor.get.call(document);
+                    document.addEventListener(
+                        type,
+                        function (event) {
 
-                }
-            });
+                            if (!spoofVisibility()) {
+                                return;
+                            }
 
-            // Enregistré au tout début (document-start) : bloque
-            // les listeners "visibilitychange" enregistrés plus
-            // tard par Twitch quand l'option est activée.
-            document.addEventListener(
-                'visibilitychange',
-                function (event) {
+                            try {
 
-                    if (pageConfig.keepQualityInBackground) {
-                        event.stopImmediatePropagation();
-                    }
+                                var video = findPlaybackVideo();
 
-                },
-                true
-            );
+                                if (video) {
+
+                                    if (hiddenDescriptor.get.call(document)) {
+
+                                        wasVideoPlaying =
+                                            !video.paused && !video.ended;
+
+                                    } else if (
+                                        wasVideoPlaying &&
+                                        !video.ended &&
+                                        video.paused &&
+                                        video.muted
+                                    ) {
+
+                                        var resumed = video.play();
+
+                                        if (resumed && resumed.catch) {
+                                            resumed.catch(function () {});
+                                        }
+
+                                    }
+
+                                }
+
+                            } catch (e) {}
+
+                            event.stopImmediatePropagation();
+
+                        },
+                        true
+                    );
+
+                });
 
         } catch (e) {
 
