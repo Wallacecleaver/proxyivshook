@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch HLS Proxy
 // @namespace    twitch-proxy-ivs
-// @version      1.9.2
+// @version      1.9.3
 // @author       razeNFR
 // @description  Twitch Guard : bloque les pubs Twitch (via proxys ou en mode Adblock sans proxy), retour arrière dans le direct et dashboard de statistiques
 // @match        https://www.twitch.tv/*
@@ -33,7 +33,7 @@
         Math.random().toString(36).substring(2, 9);
 
     // Doit être tenu à jour avec le @version de l'en-tête du script.
-    var CURRENT_VERSION = '1.9.2';
+    var CURRENT_VERSION = '1.9.3';
 
     // Même URL que @updateURL : contient toujours la dernière version
     // publiée. On la relit nous-même (plutôt que de compter sur le
@@ -316,6 +316,10 @@
     // à 30 min n'aurait aucun intérêt : personne ne règle un
     // buffer à 7 min 20. Des crans donnent en prime une étiquette
     // lisible et une estimation mémoire stable.
+    // Pas du volume à la molette, en %. Réglé dans les réglages du
+    // lecteur custom.
+    var WHEEL_VOLUME_STEPS = [1, 2, 5, 10];
+
     var DVR_BUFFER_STEPS = [
         30, 60, 120, 180, 300, 600, 900, 1200, 1800
     ];
@@ -398,6 +402,8 @@
             dvrChannels: {},
             dvrBufferSeconds: DEFAULT_DVR_BUFFER_SECONDS,
             statsEnabled: true,
+            dvrAutoNoVod: false,
+            wheelVolumeStep: 1,
             customPlayer: true,
             hideTwitchTurbo: false,
             proxiesEnabled: true,
@@ -612,7 +618,7 @@
 
         }
 
-        ['statsEnabled', 'customPlayer', 'hideTwitchTurbo', 'hideTwitchSubButtons', 'hideTwitchPromo', 'proxiesEnabled'].forEach(
+        ['statsEnabled', 'customPlayer', 'hideTwitchTurbo', 'hideTwitchSubButtons', 'hideTwitchPromo', 'proxiesEnabled', 'dvrAutoNoVod'].forEach(
             function (key) {
                 if (typeof parsed[key] === 'boolean') {
                     config[key] = parsed[key];
@@ -655,6 +661,10 @@
             config.dvrBufferSeconds =
                 parsed.dvrBufferSeconds;
 
+        }
+
+        if (WHEEL_VOLUME_STEPS.indexOf(parsed.wheelVolumeStep) >= 0) {
+            config.wheelVolumeStep = parsed.wheelVolumeStep;
         }
 
         return config;
@@ -898,6 +908,12 @@
                 dvrBufferSeconds:
                     pageConfig.dvrBufferSeconds,
 
+                dvrAutoNoVod:
+                    !!pageConfig.dvrAutoNoVod,
+
+                wheelVolumeStep:
+                    pageConfig.wheelVolumeStep || 1,
+
                 statsEnabled:
                     pageConfig.statsEnabled !== false,
 
@@ -1137,9 +1153,51 @@
 
                 // Mode Adblock : coupures pub bloquées, et leur durée.
                 adsBlockedGlobal: 0,
-                adsBlockedMsGlobal: 0
+                adsBlockedMsGlobal: 0,
+                adblockWatchMsGlobal: 0
             }
         };
+
+    }
+
+    // Les pubs de début de stream ne comptent plus : elles dépendent du
+    // moment où on ouvre le stream, pas du streamer. Celles gardées dans
+    // l'historique sont retirées des compteurs. Refait à chaque lecture
+    // du stockage, sans effet une fois l'historique propre.
+    function purgePrerollAds(stats) {
+
+        if (!stats || !Array.isArray(stats.adBlocks)) {
+            return stats;
+        }
+
+        var kept = stats.adBlocks.filter(function (e) {
+
+            if (!e || e.midroll !== false) {
+                return true;
+            }
+
+            var ms = e.ms || 0;
+            var totals = stats.totals || {};
+
+            totals.adsBlockedGlobal = Math.max(0, (totals.adsBlockedGlobal || 0) - 1);
+            totals.adsBlockedMsGlobal = Math.max(0, (totals.adsBlockedMsGlobal || 0) - ms);
+
+            var s = stats.streamers && stats.streamers[e.channel];
+
+            if (s) {
+                s.adsBlocked = Math.max(0, (s.adsBlocked || 0) - 1);
+                s.adsBlockedMs = Math.max(0, (s.adsBlockedMs || 0) - ms);
+            }
+
+            return false;
+
+        });
+
+        if (kept.length !== stats.adBlocks.length) {
+            stats.adBlocks = kept;
+        }
+
+        return stats;
 
     }
 
@@ -1186,7 +1244,7 @@
 
                 }
 
-                return stats;
+                return purgePrerollAds(stats);
 
             }
 
@@ -3449,6 +3507,20 @@
         streamer.lastSeen = Date.now();
 
         pageStats.totals.watchTimeMsGlobal += watchedMs;
+        // Mode Adblock : compté à part, pour que la part de pub d'un
+        // streamer ne mélange pas les heures passées en mode Proxy,
+        // où les pubs ne sont pas comptées.
+        if (!proxiesOn()) {
+            streamer.adblockWatchMs =
+                (streamer.adblockWatchMs || 0) + watchedMs;
+            pageStats.totals.adblockWatchMsGlobal =
+                (pageStats.totals.adblockWatchMsGlobal || 0) + watchedMs;
+            // Compteur de la médaille : démarré avec elle, pour que
+            // les pubs comptées avant ne gonflent pas la part de pub.
+            streamer.adShareWatchMs =
+                (streamer.adShareWatchMs || 0) + watchedMs;
+            spAddStreamWatch(channel, watchedMs);
+        }
 
         recordSessionProgress(watchedMs);
 
@@ -4133,6 +4205,9 @@
             target.bandwidthBytes = maxNum(target.bandwidthBytes, source.bandwidthBytes);
             target.adsBlocked = maxNum(target.adsBlocked, source.adsBlocked);
             target.adsBlockedMs = maxNum(target.adsBlockedMs, source.adsBlockedMs);
+            target.adblockWatchMs = maxNum(target.adblockWatchMs, source.adblockWatchMs);
+            target.adShareAdMs = maxNum(target.adShareAdMs, source.adShareAdMs);
+            target.adShareWatchMs = maxNum(target.adShareWatchMs, source.adShareWatchMs);
 
             mergeNumericMap(target.proxyUsage, source.proxyUsage);
 
@@ -4386,7 +4461,7 @@
 
                 }
 
-                mergeStatsFrom(incoming);
+                mergeStatsFrom(purgePrerollAds(incoming));
 
                 // Une restauration remplace : le nouvel epoch dit aux
                 // autres onglets de jeter leur delta, qui porterait
@@ -5166,13 +5241,27 @@
             <span class="tp9-ab-label">de pub évitée</span>
         </div>
         <div class="tp9-ab-stat"
-            data-tp9-tip="Pubs bloquées au total"
-            data-tp9-tip-sub="Toutes chaînes confondues, depuis la mise en place du compteur.">
+            data-tp9-tip="Pubs bloquées sur cette chaîne"
+            data-tp9-tip-sub="Toutes les coupures pub bloquées sur la chaîne que tu regardes, depuis toujours. Les autres chaînes ne comptent pas ici.">
             <span class="tp9-ab-value tp9-ab-total">0</span>
-            <span class="tp9-ab-label">au total</span>
+            <span class="tp9-ab-label">sur la chaîne</span>
         </div>
     </div>
-    <div class="tp9-sans-proxy-text">La qualité peut baisser le temps d'une coupure pub.</div>
+    <div class="tp9-ab-ratio"
+        data-tp9-tip="Part de pub de cette chaîne"
+        data-tp9-tip-sub="Temps de pub sur temps regardé en mode Adblock, depuis toujours. Médaille après 30 min : 🏆 0 %, 🥇 moins de 3 %, 🥈 moins de 7 %, 🥉 moins de 12 %, 💩 20 % et plus.">
+        <div class="tp9-ab-ratio-line">
+            <span class="tp9-ab-ratio-text">Le compte démarre avec la lecture</span>
+            <span class="tp9-ab-ratio-medal"></span>
+            <span class="tp9-ab-ratio-pct">—</span>
+        </div>
+        <div class="tp9-ab-ratio-bar"><span class="tp9-ab-ratio-fill"></span></div>
+        <div class="tp9-ab-ratio-note"></div>
+    </div>
+    <div class="tp9-sans-proxy-notes">
+        <div class="tp9-sans-proxy-note"><span>📉</span>Qualité réduite pendant une pub</div>
+        <div class="tp9-sans-proxy-note"><span>🎬</span>Pubs de début (preroll) non comptées</div>
+    </div>
 </div>
 
 </div>
@@ -5739,6 +5828,11 @@ document.addEventListener(
                             !!pageConfig.hideTwitchTurbo,
                         proxiesEnabled:
                             pageConfig.proxiesEnabled !== false,
+                        dvrAutoNoVod:
+                            !!pageConfig.dvrAutoNoVod,
+
+                        wheelVolumeStep:
+                            pageConfig.wheelVolumeStep || 1,
 
                         hideTwitchSubButtons:
                             !!pageConfig.hideTwitchSubButtons,
@@ -6702,12 +6796,23 @@ document.addEventListener(
             pageConfig.fallback;
 
 
-        dashboard
-            .querySelector(
-                '.tp9-keep-quality'
-            )
-            .checked =
-            !!pageConfig.keepQualityInBackground;
+        // Mode Adblock : forcée (la relance de fin de pub en a besoin
+        // quand l'onglet est caché), l'interrupteur est verrouillé.
+        var keepQualityBox = dashboard.querySelector('.tp9-keep-quality');
+        var keepQualityForced = !proxiesOn();
+        keepQualityBox.checked =
+            keepQualityForced || !!pageConfig.keepQualityInBackground;
+        keepQualityBox.disabled = keepQualityForced;
+        var keepQualityRow = keepQualityBox.closest('.tp9-toggle-row');
+        if (keepQualityRow) {
+            keepQualityRow.classList.toggle('tp9-toggle-locked', keepQualityForced);
+            keepQualityRow.setAttribute(
+                'data-tp9-tip-sub',
+                keepQualityForced
+                    ? 'Toujours active en mode Adblock : sans elle, le lecteur ne repart pas après une pub quand tu es sur un autre onglet. Repasse en mode Proxy pour pouvoir la couper.'
+                    : 'Fait croire à Twitch que l\'onglet est toujours au premier plan, pour qu\'il cesse de baisser la qualité quand tu passes ailleurs.'
+            );
+        }
 
         dashboard.querySelector('.tp9-custom-player').checked = isCustomPlayerOn();
         var modeSwitch = dashboard.querySelector('.tp9-mode-switch');
@@ -6889,16 +6994,11 @@ document.addEventListener(
 
         if (activeProxyInfo.sansProxy) {
             hero.classList.add('tp9-hero-live');
-            valueEl.textContent = 'Twitch · sans proxy';
-            metaEl.textContent =
-                [
-                    spAd.active && spAd.channel === channel
-                        ? '🛡️ pub bloquée'
-                        : '🛡️ Adblock actif',
-                    formatThroughput(getLiveThroughputBps())
-                ]
-                    .filter(Boolean)
-                    .join(' · ');
+            valueEl.textContent = 'Twitch · Adblock actif';
+            var spThroughput = formatThroughput(getLiveThroughputBps());
+            // La pub en cours se lit déjà sur le badge du lecteur et dans
+            // l'encart Adblock plus bas : ici, le débit seul.
+            metaEl.textContent = '🛡️' + (spThroughput ? ' ' + spThroughput : '');
             return;
         }
         if (activeProxyInfo.direct) {
@@ -9075,6 +9175,25 @@ function showAddProxyForm() {
         }
 
 
+        .tp9dvr-set-steps {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 4px;
+        }
+        .tp9dvr-menu .tp9dvr-set-step {
+            padding: 5px 0;
+            text-align: center;
+            border-radius: 6px;
+            background: rgba(255,255,255,.06);
+            font-size: 11.5px;
+            font-variant-numeric: tabular-nums;
+        }
+        .tp9dvr-menu .tp9dvr-set-step.tp9dvr-set-step-on {
+            background: rgba(145,71,255,.35);
+            color: #fff;
+            font-weight: 700;
+        }
+
         /* Rewind extends the native controls without replacing their layout. */
         .tp9dvr.tp9dvr-integrated {
             position: absolute; inset: 0; z-index: auto;
@@ -9274,12 +9393,87 @@ function showAddProxyForm() {
 
     function isDvrChannelArmed(channel) {
 
+        return dvrArmedByHand(channel) || dvrAutoArmedFor(channel);
+
+    }
+
+
+    // Armée à la main depuis le ⚙ du lecteur.
+    function dvrArmedByHand(channel) {
+
         return !!(
             isCustomPlayerOn() &&
             channel &&
             pageConfig.dvrChannels &&
             pageConfig.dvrChannels[channel]
         );
+
+    }
+
+
+    // Option « Auto · chaînes sans VOD » : la chaîne s'arme toute
+    // seule, mais seulement une fois SÛR qu'elle n'a pas de VOD
+    // lisible. Pendant une nouvelle vérification (le cache périme
+    // toutes les 2 min), on garde la réponse d'avant : sans ça la
+    // mémoire se viderait à chaque vérification.
+    function dvrAutoArmedFor(channel) {
+
+        if (
+            !pageConfig.dvrAutoNoVod ||
+            !channel ||
+            !isCustomPlayerOn()
+        ) {
+            return false;
+        }
+
+        if (dvrVodInfoFor(channel)) {
+            return false;
+        }
+
+        var entry = dvrVodCache[channel];
+
+        if (!entry) {
+            return false;
+        }
+
+        return !(entry.id && dvrVodAccessPending[entry.id]);
+
+    }
+
+
+    // Option auto cochée, chaîne pas armée à la main, VOD pas encore
+    // tranché : la capture attend la réponse au lieu d'enregistrer
+    // pour rien.
+    function dvrAutoWaiting(channel) {
+
+        return !!(
+            pageConfig.dvrAutoNoVod &&
+            channel &&
+            isCustomPlayerOn() &&
+            !dvrArmedByHand(channel) &&
+            !dvrAutoArmedFor(channel)
+        );
+
+    }
+
+
+    function setDvrAutoNoVod(on) {
+
+        pageConfig.dvrAutoNoVod = !!on;
+
+        var channel = dvrSettingsChannel();
+
+        if (!on && !dvrArmedByHand(channel)) {
+            dvrForgetMemory();
+        }
+
+        saveConfig(pageConfig);
+        broadcastConfig();
+        console.log(
+            '[TwitchProxy][DVR] Mémoire automatique sur les chaînes sans VOD ' +
+            (on ? 'activée' : 'désactivée')
+        );
+        syncDvrMemorySuppression();
 
     }
 
@@ -9586,6 +9780,7 @@ function showAddProxyForm() {
 
 
     var dvrMemorySuppressed = null;
+    var dvrCaptureSentAt = 0;
 
     function syncDvrMemorySuppression() {
 
@@ -9595,9 +9790,17 @@ function showAddProxyForm() {
 
         var channel = getTestChannel();
 
-        var blocked = dvrMemoryBlocked(channel);
-
+        var blocked =
+            dvrMemoryBlocked(channel) ||
+            dvrAutoWaiting(channel);
         if (blocked === dvrMemorySuppressed) {
+            // Redit toutes les 5 s : un Worker neuf (lecteur
+            // reconstruit par Twitch) repart capture active et ne
+            // saurait pas qu'on l'avait coupée.
+            if (Date.now() - dvrCaptureSentAt > 5000) {
+                dvrCaptureSentAt = Date.now();
+                dvrSendCapture(!blocked);
+            }
             return;
         }
 
@@ -9611,6 +9814,7 @@ function showAddProxyForm() {
         dvrMemorySuppressed = blocked;
 
         dvrSendCapture(!blocked);
+        dvrCaptureSentAt = Date.now();
 
         if (blocked) {
 
@@ -11536,8 +11740,10 @@ function showAddProxyForm() {
     var dvrSkipAccum = 0;
     var dvrSkipAccumAt = 0;
 
-    var DVR_ICON_HISTORY = dvrSvg(
-        '<path fill="currentColor" d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.95 8.95 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/>'
+    // Des curseurs de réglage : la roue dentée est déjà celle de
+    // Twitch, juste à côté, et les deux ne doivent pas se confondre.
+    var DVR_ICON_PLAYER_SETTINGS = dvrSvg(
+        '<path fill="currentColor" d="M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z"/>'
     );
 
     // Le carton qui s'affiche au milieu du lecteur : « 42 % »,
@@ -11573,7 +11779,7 @@ function showAddProxyForm() {
     function dvrShowVolumeHint(level, muted) {
         dvrShowHint(
             (muted ? DVR_ICONS.volumeOff : {
-                low: DVR_ICONS.volumeLow, mid: DVR_ICONS.volumeMid, high: DVR_ICONS.volume
+                none: DVR_ICONS.volumeNone, low: DVR_ICONS.volumeLow, mid: DVR_ICONS.volumeMid, high: DVR_ICONS.volume
             }[dvrVolumeLevel(level)]) +
             '<span>' + (muted ? 'Muet' : Math.round(level * 100) + ' %') + '</span>'
         );
@@ -11596,7 +11802,7 @@ function showAddProxyForm() {
     }
 
     // ------------------------------------------------------------
-    // La molette règle le son, par pas de 1 %
+    // La molette règle le son, par pas réglable (1 % par défaut)
     // ------------------------------------------------------------
     //
     // C'est Twitch qui tient le volume maintenant : on passe donc
@@ -11605,6 +11811,12 @@ function showAddProxyForm() {
     // son bouton muet. Dans le passé, le détournement de volume de
     // l'habillage fait suivre notre vidéo toute seule.
     var dvrWheelWatched = false;
+
+    function dvrWheelStep() {
+        return WHEEL_VOLUME_STEPS.indexOf(pageConfig.wheelVolumeStep) >= 0
+            ? pageConfig.wheelVolumeStep
+            : 1;
+    }
 
     function dvrSetTwitchSlider(slider, value) {
         var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
@@ -11643,8 +11855,14 @@ function showAddProxyForm() {
             setTimeout(function () { dvrShowVolumeHint(video.volume, false); }, 60);
             return;
         }
-        var current = muted ? 0 : video.volume;
-        var level = Math.round((current + (up ? 0.01 : -0.01)) * 100) / 100;
+        var current = muted ? 0 : Math.round(video.volume * 100);
+        var step = dvrWheelStep();
+        // Calé sur les multiples du pas : à 5 %, 33 % monte à 35 %
+        // puis 40 %, et descend à 30 %.
+        var target = up
+            ? (Math.floor(current / step) + 1) * step
+            : (Math.ceil(current / step) - 1) * step;
+        var level = target / 100;
         if (level < 0) level = 0;
         if (level > 1) level = 1;
         if (slider) {
@@ -11838,27 +12056,6 @@ function showAddProxyForm() {
         var back = dvrQuery('.tp9dvr-back');
         var fwd = dvrQuery('.tp9dvr-fwd');
         var speed = dvrQuery('.tp9dvr-speed');
-        // Chaîne avec VOD : la mémoire ne capture rien, ses réglages
-        // n'ont plus d'objet. aria-disabled plutôt que disabled : un
-        // bouton désactivé ne reçoit plus la souris, et l'infobulle
-        // qui explique pourquoi ne s'afficherait jamais.
-        var settingsBtn = dvrQuery('.tp9dvr-settings');
-        if (settingsBtn) {
-            var memoryUseless = dvrMemoryBlocked(dvrChannelInUse);
-            var offFlag = memoryUseless ? 'true' : 'false';
-            if (settingsBtn.getAttribute('aria-disabled') !== offFlag) {
-                settingsBtn.setAttribute('aria-disabled', offFlag);
-                settingsBtn.classList.toggle('tp9dvr-btn-off', memoryUseless);
-                settingsBtn.dataset.tp9Tip = memoryUseless
-                    ? 'Réglages du retour arrière · inutiles ici'
-                    : 'Réglages du retour arrière';
-                settingsBtn.dataset.tp9TipSub = memoryUseless
-                    ? 'Cette chaîne a un VOD : il couvre déjà tout le stream, la mémoire est coupée et n\'a rien à régler.'
-                    : 'Armer la mémoire de cette chaîne et régler sa profondeur.';
-                if (memoryUseless) dvrCloseSettingsMenu();
-                refreshTooltipText(settingsBtn);
-            }
-        }
         if (back && back.disabled !== !playable) {
             back.disabled = !playable;
         }
@@ -14011,6 +14208,10 @@ function showAddProxyForm() {
             ' stroke-linecap="round" d="M15.8 7.8a6 6 0 0 1 0 8.4"/>'
         ),
 
+        volumeNone: dvrSvg(
+            '<path fill="currentColor" d="M2 9h3.5L10 5v14l-4.5-4H2z"/>'
+        ),
+
         volumeLow: dvrSvg(
             '<path fill="currentColor" d="M2 9h3.5L10 5v14l-4.5-4H2z"/>' +
             '<path fill="none" stroke="currentColor" stroke-width="1.8"' +
@@ -14145,10 +14346,10 @@ function showAddProxyForm() {
             ' style="display:none">1×</button>' +
             '<button class="tp9dvr-live" type="button" aria-label="Revenir au direct">' +
             '<span class="tp9dvr-live-dot"></span>DIRECT</button>' +
-            '<button class="tp9dvr-btn tp9dvr-settings" type="button" aria-label="Réglages du retour arrière"' +
-            ' data-tp9-tip="Réglages du retour arrière"' +
-            ' data-tp9-tip-sub="Armer la mémoire de cette chaîne et régler sa profondeur.">' +
-            DVR_ICON_HISTORY + '</button>';
+            '<button class="tp9dvr-btn tp9dvr-settings" type="button" aria-label="Réglages du lecteur"' +
+            ' data-tp9-tip="Réglages du lecteur"' +
+            ' data-tp9-tip-sub="Mémoire du retour arrière et pas du volume à la molette.">' +
+            DVR_ICON_PLAYER_SETTINGS + '</button>';
         positionDvrOverlay();
         attachTooltips(dvrNativeBar);
         attachTooltips(dvrNativeInfo);
@@ -14479,7 +14680,10 @@ function showAddProxyForm() {
         // n'a simplement rien à faire ici — et son infobulle le dit,
         // sans quoi un interrupteur mort passe pour une panne.
         var armed = isDvrChannelArmed(channel) && !blocked;
-
+        var autoArmed =
+            !blocked &&
+            dvrAutoArmedFor(channel) &&
+            !dvrArmedByHand(channel);
         var seconds =
             pageConfig.dvrBufferSeconds ||
             DEFAULT_DVR_BUFFER_SECONDS;
@@ -14504,10 +14708,14 @@ function showAddProxyForm() {
                 ' data-tp9-tip="' +
                 (blocked
                     ? 'Inutile sur cette chaîne'
-                    : 'Garder cette chaîne en mémoire') +
+                    : autoArmed
+                        ? 'Armée automatiquement'
+                        : 'Garder cette chaîne en mémoire') +
                 '" data-tp9-tip-sub="' +
                 (blocked
                     ? 'Cette chaîne a un VOD exploitable : il remonte à tout le stream, là où la mémoire ne garderait que quelques minutes — en mangeant de la RAM en permanence. La capture est donc coupée tant que le VOD est là, et elle repartira toute seule s\'il disparaît.'
+                    : autoArmed
+                        ? 'Cette chaîne n\'a pas de VOD : l\'option « Auto · chaînes sans VOD » garde ses dernières minutes en mémoire. Décoche-la pour choisir chaîne par chaîne.'
                     : 'Enregistre les dernières minutes de ' +
                         escapeHTML(channel || 'cette chaîne') +
                         ' dans la RAM pour pouvoir les rejouer. Ça coûte de la mémoire en permanence, donc ça ne s\'arme que là où tu le demandes. Le VOD, lui, reste utilisable sans rien armer.') +
@@ -14518,11 +14726,20 @@ function showAddProxyForm() {
                 '<span class="tp9dvr-set-switch">' +
                     '<input type="checkbox" class="tp9dvr-set-armed"' +
                     (armed ? ' checked' : '') +
-                    (channel && !blocked ? '' : ' disabled') + '>' +
+                    (channel && !blocked && !autoArmed ? '' : ' disabled') + '>' +
                     '<span class="tp9dvr-set-track"></span>' +
                 '</span>' +
             '</label>' +
-
+            '<label class="tp9dvr-set-row"' +
+                ' data-tp9-tip="Mémoire automatique sans VOD"' +
+                ' data-tp9-tip-sub="Dès que tu arrives sur une chaîne qui n\'a pas de VOD, la mémoire démarre toute seule, sans l\'armer chaîne par chaîne. Sur une chaîne avec VOD, rien ne change : le VOD suffit.">' +
+                '<span class="tp9dvr-set-label">Auto · chaînes sans VOD</span>' +
+                '<span class="tp9dvr-set-switch">' +
+                    '<input type="checkbox" class="tp9dvr-set-auto"' +
+                    (pageConfig.dvrAutoNoVod ? ' checked' : '') + '>' +
+                    '<span class="tp9dvr-set-track"></span>' +
+                '</span>' +
+            '</label>' +
             '<div class="tp9dvr-set-block' +
                 (armed ? '' : ' tp9dvr-set-idle') + '"' +
                 ' data-tp9-tip="Profondeur gardée en mémoire"' +
@@ -14545,7 +14762,24 @@ function showAddProxyForm() {
                 '<div class="tp9dvr-set-hint"></div>' +
             '</div>' +
 
-            '<div class="tp9dvr-set-foot"></div>';
+            '<div class="tp9dvr-set-foot"></div>' +
+
+            '<div class="tp9dvr-set-head">Volume</div>' +
+            '<div class="tp9dvr-set-block"' +
+                ' data-tp9-tip="Pas du volume à la molette"' +
+                ' data-tp9-tip-sub="De combien le son monte ou descend à chaque cran de molette sur le lecteur.">' +
+                '<div class="tp9dvr-set-line">' +
+                    '<span class="tp9dvr-set-label">Molette</span>' +
+                    '<span class="tp9dvr-set-value">' + dvrWheelStep() + ' % par cran</span>' +
+                '</div>' +
+                '<div class="tp9dvr-set-steps">' +
+                    WHEEL_VOLUME_STEPS.map(function (step) {
+                        return '<button type="button" class="tp9dvr-set-step' +
+                            (step === dvrWheelStep() ? ' tp9dvr-set-step-on' : '') +
+                            '" data-step="' + step + '">' + step + ' %</button>';
+                    }).join('') +
+                '</div>' +
+            '</div>';
 
         dvrUpdateSettingsHint();
 
@@ -14730,6 +14964,31 @@ function showAddProxyForm() {
 
         }
 
+        var autoBox = menu.querySelector('.tp9dvr-set-auto');
+        if (autoBox) {
+            autoBox.addEventListener(
+                'change',
+                function (event) {
+                    setDvrAutoNoVod(event.target.checked);
+                    dvrRenderSettingsMenu();
+                    dvrPlaceMenu(
+                        menu,
+                        dvrQuery('.tp9dvr-settings')
+                    );
+                }
+            );
+        }
+        Array.prototype.forEach.call(
+            menu.querySelectorAll('.tp9dvr-set-step'),
+            function (button) {
+                button.addEventListener('click', function () {
+                    pageConfig.wheelVolumeStep = parseInt(button.getAttribute('data-step'), 10);
+                    saveConfig(pageConfig);
+                    dvrRenderSettingsMenu();
+                    dvrPlaceMenu(menu, dvrQuery('.tp9dvr-settings'));
+                });
+            }
+        );
         var range = menu.querySelector('.tp9dvr-set-range');
 
         if (range) {
@@ -14799,11 +15058,7 @@ function showAddProxyForm() {
             return;
         }
 
-        // Grisée (la chaîne a un VOD) : le clic ne fait rien.
-        if (dvrMemoryBlocked(dvrSettingsChannel())) {
-            dvrCloseSettingsMenu();
-            return;
-        }
+        
 
         var open = menu.classList.contains('tp9dvr-menu-on');
 
@@ -15321,6 +15576,7 @@ function showAddProxyForm() {
             after('mute') + '{--tp9-icon:' + dvrIconMask('volume') + '}' +
             after('mute', '[data-tp9-vol="mid"]') + '{--tp9-icon:' + dvrIconMask('volumeMid') + '}' +
             after('mute', '[data-tp9-vol="low"]') + '{--tp9-icon:' + dvrIconMask('volumeLow') + '}' +
+            after('mute', '[data-tp9-vol="none"]') + '{--tp9-icon:' + dvrIconMask('volumeNone') + '}' +
             after('mute', '[data-tp9-muted="1"]') + '{--tp9-icon:' + dvrIconMask('volumeOff') + '}' +
             // Curseur caché par Twitch : on replie sa boîte pour que les boutons
             // suivants se collent au bouton du son. Il se déplie dès qu'on
@@ -15384,10 +15640,11 @@ function showAddProxyForm() {
         (document.head || document.documentElement).appendChild(style);
     }
 
-    // Niveau du son pour l'icône : une onde sous 35 %, deux jusqu'à
-    // 70 %, trois au-delà.
+    // Niveau du son pour l'icône : aucune onde sous 15 %, une jusqu'à
+    // 35 %, deux jusqu'à 65 %, trois au-delà. 0 % = icône muet.
     function dvrVolumeLevel(volume) {
-        return volume < 0.35 ? 'low' : volume <= 0.7 ? 'mid' : 'high';
+        var pct = Math.round((volume || 0) * 100);
+        return pct < 15 ? 'none' : pct < 35 ? 'low' : pct < 65 ? 'mid' : 'high';
     }
 
     function dvrSyncVolumeIcon() {
@@ -20925,6 +21182,94 @@ dashboardButton.style.visibility =
             .tp9-mode-block .tp9-sans-proxy-card {
                 margin-top: 8px;
             }
+            .tp9-ab-ratio {
+                margin: 0 0 6px;
+                padding: 6px 8px 7px;
+                border-radius: 7px;
+                background: rgba(0,0,0,.28);
+                cursor: default;
+            }
+            .tp9-ab-ratio-line {
+                display: flex;
+                align-items: baseline;
+                justify-content: space-between;
+                gap: 8px;
+                font-size: 10.5px;
+                color: #9fe8c4;
+            }
+            .tp9-ab-ratio-text {
+                min-width: 0;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+            .tp9-ab-ratio-text b {
+                color: #fff;
+                font-weight: 700;
+            }
+            .tp9-ab-ratio-pct {
+                flex: none;
+                font-size: 12px;
+                font-weight: 800;
+                color: #fff;
+                font-variant-numeric: tabular-nums;
+            }
+            .tp9-ab-ratio-medal {
+                flex: none;
+                margin-left: auto;
+                font-size: 14px;
+                line-height: 1;
+            }
+            .tp9-ab-ratio-medal:empty {
+                display: none;
+            }
+            .tp9-ab-ratio-note {
+                margin-top: 4px;
+                font-size: 10px;
+                color: #7fcdae;
+            }
+            .tp9-ab-ratio-note:empty {
+                display: none;
+            }
+            .tp9-ab-ratio-bar {
+                margin-top: 5px;
+                height: 4px;
+                border-radius: 2px;
+                background: rgba(255,255,255,.08);
+                overflow: hidden;
+            }
+            .tp9-ab-ratio-fill {
+                display: block;
+                width: 0;
+                height: 100%;
+                border-radius: inherit;
+                background: linear-gradient(90deg, #00e57a, #00b862);
+                transition: width .4s ease;
+            }
+            .tp9-ab-ratio-high .tp9-ab-ratio-fill {
+                background: linear-gradient(90deg, #ffcf7a, #ff9f43);
+            }
+            .tp9-ab-ratio-high .tp9-ab-ratio-pct {
+                color: #ffcf7a;
+            }
+            .tp9-toggle-row.tp9-toggle-locked {
+                cursor: not-allowed;
+            }
+            .tp9-toggle-row.tp9-toggle-locked .tp9-switch {
+                opacity: .5;
+                pointer-events: none;
+            }
+            .tp9-toggle-row.tp9-toggle-locked .tp9-toggle-label::after {
+                content: 'Adblock';
+                margin-left: 6px;
+                padding: 1px 5px;
+                border-radius: 4px;
+                background: rgba(0,229,122,.16);
+                color: #00e57a;
+                font-size: 9.5px;
+                font-weight: 700;
+                vertical-align: 1px;
+            }
             .tp9-ab-stats {
                 display: grid;
                 grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -20980,6 +21325,31 @@ dashboardButton.style.visibility =
                 font-size: 12px;
                 color: #00e57a;
                 margin-bottom: 3px;
+            }
+            .tp9-sans-proxy-notes {
+                display: flex;
+                flex-direction: column;
+                gap: 3px;
+                margin-top: 7px;
+                padding-top: 7px;
+                border-top: 1px solid rgba(255,255,255,.08);
+            }
+            .tp9-sans-proxy-note {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                font-size: 10.5px;
+                line-height: 1.35;
+                color: #a9a9b0;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+            .tp9-sans-proxy-note span {
+                flex: none;
+                width: 14px;
+                text-align: center;
+                font-size: 11px;
             }
             .tp9-proxy-warning {
 
@@ -22401,14 +22771,63 @@ dashboardButton.style.visibility =
 
             .tp9s-table-row-antipub {
 
-                grid-template-columns: 34px 1.6fr .8fr 1fr 1.2fr;
+                grid-template-columns: 34px 1.5fr .8fr .9fr 1.1fr 1.1fr;
 
+            }
+
+
+            .tp9s-adshare {
+                display: inline-flex;
+                align-items: center;
+                gap: 8px;
+                font-variant-numeric: tabular-nums;
+            }
+
+
+            .tp9s-adshare-bar {
+                flex: none;
+                width: 52px;
+                height: 5px;
+                border-radius: 3px;
+                background: rgba(255,255,255,.08);
+                overflow: hidden;
+            }
+
+
+            .tp9s-adshare-bar i {
+                display: block;
+                height: 100%;
+                border-radius: inherit;
+                background: #00e57a;
+            }
+
+
+            .tp9s-adshare b {
+                font-weight: 700;
+            }
+
+
+            .tp9-ad-medal {
+                margin-left: 6px;
+                font-size: 14px;
+                line-height: 1;
+                cursor: help;
+            }
+
+
+            .tp9s-adshare-high .tp9s-adshare-bar i {
+                background: #ff9f43;
+            }
+
+
+            .tp9s-adshare-high b {
+                color: #ffb561;
             }
 
 
             .tp9s-table-row-adlog {
 
-                grid-template-columns: 1.1fr 1.2fr 1fr .8fr 1.4fr;
+                grid-template-columns: 1.1fr 1.2fr .8fr 1.4fr;
 
             }
 
@@ -26287,7 +26706,7 @@ dashboardButton.style.visibility =
         overview: { title: 'VUE D’ENSEMBLE', sub: 'Ton activité Twitch et l\'état de tes proxys en un coup d\'œil' },
         relais: { title: 'PROXYS', sub: 'Classement et utilisation de tes proxys' },
         streamers: { title: 'STREAMERS', sub: 'Statistiques par chaîne regardée' },
-        antipub: { title: 'ANTI-PUB', sub: 'Les pubs bloquées par le mode Adblock, sans proxy' },
+        antipub: { title: 'ANTI-PUB', sub: 'Pubs en cours de stream bloquées en mode Adblock · pubs de début non comptées' },
         habitudes: { title: 'HABITUDES', sub: 'Quand est-ce que tu regardes Twitch ?' },
         sauvegarde: { title: 'SAUVEGARDE', sub: 'Mettre tes statistiques à l\'abri d\'un nettoyage de navigateur' },
         logs: { title: 'LOGS', sub: 'Journal des événements du script' }
@@ -28489,8 +28908,8 @@ dashboardButton.style.visibility =
                                     ' data-tp9-tip="' + s.adsBlocked + ' pub(s) bloquée(s)"' +
                                     ' data-tp9-tip-sub="' +
                                     escapeHTML(formatAdSaved(s.adsBlockedMs || 0) + ' de pub évitée sur cette chaîne, en mode Adblock.') +
-                                    '">🛡️ ' + s.adsBlocked + '</span>'
-                                : '<span class="tp9s-td-dim">0</span>'
+                                    '">🛡️ ' + s.adsBlocked + '</span>' + adMedalHTML(s)
+                                : '<span class="tp9s-td-dim">0</span>' + adMedalHTML(s)
                         ) +
                     '</div>' +
                     '<div class="tp9s-td tp9s-td-flex tp9s-td-dim">' +
@@ -28556,7 +28975,7 @@ dashboardButton.style.visibility =
                         ${sortableHeaderHTML('Tes messages', 'streamers', 'chatMessages', key, dir)}
                         ${sortableHeaderHTML('Pubs bloquées', 'streamers', 'adsBlocked', key, dir,
                             'Pubs bloquées par le mode Adblock',
-                            'Coupures pub bloquées sur cette chaîne sans passer par un proxy. Survole un nombre pour le temps de pub évité.')}
+                            'Pubs en cours de stream, en mode Adblock. Survole un nombre pour le temps évité.')}
                         ${sortableHeaderHTML('Bande passante (total)', 'streamers', 'bandwidthBytes', key, dir)}
                         <div class="tp9s-td">Proxy principal</div>
                         <div class="tp9s-td"></div>
@@ -28631,9 +29050,6 @@ dashboardButton.style.visibility =
             return acc + (e.ms || 0);
         }, 0);
 
-        var midroll = events.filter(function (e) {
-            return e.midroll;
-        }).length;
 
         var finished = events.filter(function (e) {
             return e.ms > 0;
@@ -28641,6 +29057,9 @@ dashboardButton.style.visibility =
         var averageMs = finished.length
             ? finished.reduce(function (acc, e) { return acc + e.ms; }, 0) / finished.length
             : 0;
+        var longest = finished.reduce(function (best, e) {
+            return !best || e.ms > best.ms ? e : best;
+        }, null);
 
         var backups = {};
         events.forEach(function (e) {
@@ -28678,10 +29097,10 @@ dashboardButton.style.visibility =
 
             statCard(
                 '📺',
-                'EN COURS DE STREAM',
-                events.length ? midroll : '—',
-                events.length
-                    ? (events.length - midroll) + ' pub(s) de début de stream'
+                'PLUS LONGUE COUPURE',
+                longest ? formatAdSaved(longest.ms) : '—',
+                longest
+                    ? getStreamerDisplayName(longest.channel) + ' · ' + formatSessionDate(longest.t)
                     : 'aucune donnée',
                 '#bf94ff'
             ),
@@ -28707,11 +29126,57 @@ dashboardButton.style.visibility =
             }
         });
 
+        // Part de pub : sur le temps regardé en mode Adblock, et à
+        // partir d'une minute (en dessous, une seule coupure ferait
+        // 80 %). Du plus chargé en pub au moins chargé ; les chaînes
+        // sans part calculable ferment la marche, par nombre de pubs.
+        var shareOf = function (s) {
+            return (s.adShareWatchMs || 0) >= 60000
+                ? adShareOf(s)
+                : null;
+        };
+        // Une chaîne regardée sans aucune pub mérite aussi sa ligne :
+        // c'est elle qui aura la plus belle médaille.
         var channels = Object.keys(pageStats.streamers).filter(function (channel) {
-            return pageStats.streamers[channel].adsBlocked > 0;
+            var s = pageStats.streamers[channel];
+            return s.adsBlocked > 0 || (s.adShareWatchMs || 0) > 0;
         }).sort(function (a, b) {
+            var sa = shareOf(pageStats.streamers[a]);
+            var sb = shareOf(pageStats.streamers[b]);
+            if ((sa === null) !== (sb === null)) {
+                return sa === null ? 1 : -1;
+            }
+            if (sa !== null && sa !== sb) {
+                return sb - sa;
+            }
             return pageStats.streamers[b].adsBlocked - pageStats.streamers[a].adsBlocked;
         });
+        var shareCell = function (s) {
+            var pct = shareOf(s);
+            if (pct === null) {
+                return (
+                    '<span class="tp9s-td-dim" data-tp9-tip="Pas encore assez de visionnage"' +
+                        ' data-tp9-tip-sub="Calculée à partir d\'1 min regardée en mode Adblock.">—</span>'
+                );
+            }
+            var high = pct >= AD_SHARE_HIGH;
+            return (
+                '<span class="tp9s-adshare' + (high ? ' tp9s-adshare-high' : '') + '"' +
+                    ' data-tp9-tip="' + escapeHTML(formatAdShare(pct) + ' du temps regardé était de la pub') + '"' +
+                    ' data-tp9-tip-sub="' + escapeHTML(
+                        formatAdSaved(s.adShareAdMs || 0) + ' de pub sur ' +
+                        formatDuration(s.adShareWatchMs) + ' regardées.' +
+                        ((s.adShareWatchMs || 0) < AD_MEDAL_MIN_WATCH_MS
+                            ? ' Médaille dans ' +
+                                Math.max(1, Math.ceil((AD_MEDAL_MIN_WATCH_MS - s.adShareWatchMs) / 60000)) + ' min.'
+                            : '')
+                    ) + '">' +
+                    '<span class="tp9s-adshare-bar"><i style="width:' + Math.min(100, pct).toFixed(1) + '%"></i></span>' +
+                    '<b>' + escapeHTML(formatAdShare(pct)) + '</b>' +
+                    adMedalHTML(s) +
+                '</span>'
+            );
+        };
 
         var streamerRows = channels.map(function (channel, index) {
 
@@ -28732,6 +29197,7 @@ dashboardButton.style.visibility =
                     '</div>' +
                     '<div class="tp9s-td tp9s-td-strong">' + s.adsBlocked + '</div>' +
                     '<div class="tp9s-td">' + escapeHTML(formatAdSaved(s.adsBlockedMs || 0)) + '</div>' +
+                    '<div class="tp9s-td">' + shareCell(s) + '</div>' +
                     '<div class="tp9s-td tp9s-td-dim">' +
                         (lastByChannel[channel] ? escapeHTML(formatSessionDate(lastByChannel[channel])) : '—') +
                     '</div>' +
@@ -28755,11 +29221,6 @@ dashboardButton.style.visibility =
                     '<div class="tp9s-td tp9s-td-dim">' + escapeHTML(formatSessionDate(e.t)) + '</div>' +
                     '<div class="tp9s-td tp9s-td-name">' + escapeHTML(getStreamerDisplayName(e.channel)) + '</div>' +
                     '<div class="tp9s-td">' +
-                        '<span class="tp9s-tag" style="--tone:' + (e.midroll ? '#bf94ff' : '#4fc3f7') + '">' +
-                            (e.midroll ? 'En cours de stream' : 'Début de stream') +
-                        '</span>' +
-                    '</div>' +
-                    '<div class="tp9s-td">' +
                         (e.ms
                             ? escapeHTML(formatAdSaved(e.ms))
                             : '<span class="tp9s-td-dim">' + (running ? 'en cours…' : '—') + '</span>') +
@@ -28782,13 +29243,14 @@ dashboardButton.style.visibility =
 
             '<div class="tp9s-panel">' +
                 '<div class="tp9s-panel-title">🎥 Par streamer</div>' +
-                '<div class="tp9s-panel-sub">Les chaînes où le mode Adblock a bloqué des pubs</div>' +
+                '<div class="tp9s-panel-sub">Les chaînes où le mode Adblock a bloqué des pubs, de la plus chargée en pub à la moins chargée</div>' +
                 '<div class="tp9s-table">' +
                     '<div class="tp9s-table-row tp9s-table-row-antipub tp9s-table-head">' +
                         '<div class="tp9s-td"></div>' +
                         '<div class="tp9s-td tp9s-td-name">Streamer</div>' +
                         '<div class="tp9s-td">Pubs bloquées</div>' +
                         '<div class="tp9s-td">Temps évité</div>' +
+                        '<div class="tp9s-td" data-tp9-tip="Part de pub" data-tp9-tip-sub="Temps de pub sur temps regardé, en mode Adblock.">Part de pub</div>' +
                         '<div class="tp9s-td">Dernière pub</div>' +
                     '</div>' +
                     (streamerRows ||
@@ -28804,7 +29266,6 @@ dashboardButton.style.visibility =
                     '<div class="tp9s-table-row tp9s-table-row-adlog tp9s-table-head">' +
                         '<div class="tp9s-td">Quand</div>' +
                         '<div class="tp9s-td tp9s-td-name">Streamer</div>' +
-                        '<div class="tp9s-td">Type</div>' +
                         '<div class="tp9s-td">Durée</div>' +
                         '<div class="tp9s-td">À la place</div>' +
                     '</div>' +
@@ -28875,6 +29336,11 @@ dashboardButton.style.visibility =
         pageStats.totals.adsBlockedMsGlobal = Math.max(
             0,
             (pageStats.totals.adsBlockedMsGlobal || 0) - (streamer.adsBlockedMs || 0)
+        );
+
+        pageStats.totals.adblockWatchMsGlobal = Math.max(
+            0,
+            (pageStats.totals.adblockWatchMsGlobal || 0) - (streamer.adblockWatchMs || 0)
         );
 
     }
@@ -30766,19 +31232,23 @@ dashboardButton.style.visibility =
                                     'boolean'
                                 ) {
 
+                                    var __tp_wasOff = __tp_dvrCaptureOff;
                                     __tp_dvrCaptureOff =
                                         !event.data.capture;
-                                    console.log(
-                                        "[TwitchProxy][DVR] Capture " +
-                                        (__tp_dvrCaptureOff ? "coupée (la chaîne a un VOD)" : "active")
-                                    );
-
+                                    // La page le redit toutes les 5 s :
+                                    // on ne parle et ne vide qu'au
+                                    // changement.
+                                    if (__tp_wasOff !== __tp_dvrCaptureOff) {
+                                        console.log(
+                                            "[TwitchProxy][DVR] Capture " +
+                                            (__tp_dvrCaptureOff ? "coupée (la chaîne a un VOD, ou vérification en cours)" : "active")
+                                        );
+                                    }
                                     if (__tp_dvrCaptureOff) {
-
-                                        __tp_dvrClear();
-
+                                        if (!__tp_wasOff) {
+                                            __tp_dvrClear();
+                                        }
                                         return;
-
                                     }
 
                                 }
@@ -31911,8 +32381,16 @@ dashboardButton.style.visibility =
                         channel &&
                         __tp_config &&
                         __tp_config.customPlayer !== false &&
-                        __tp_config.dvrChannels &&
-                        __tp_config.dvrChannels[channel]
+                        (
+                            // Option auto : armée partout, c'est la
+                            // page qui coupe la capture là où il y
+                            // a un VOD (ou tant qu'elle ne sait pas).
+                            __tp_config.dvrAutoNoVod ||
+                            (
+                                __tp_config.dvrChannels &&
+                                __tp_config.dvrChannels[channel]
+                            )
+                        )
                     );
 
                 } catch(e) {
@@ -32897,22 +33375,335 @@ dashboardButton.style.visibility =
                 }
                 return type;
             }
+            // Diagnostic : ce que Twitch annonce de la pub à l'avance
+            // (durée, nombre de pubs de la coupure), pour savoir si on
+            // peut afficher le temps restant dans le badge. Une ligne
+            // par repère de pub, pas une à chaque relecture de la liste.
+            function __sp_logAdInfo(info, text){
+                if (!info.adIdsSeen) {
+                    info.adIdsSeen = {};
+                }
+                var lines = __sp_lines(text);
+                for (var i = 0; i < lines.length; i++) {
+                    var line = lines[i];
+                    if (
+                        line.indexOf("#EXT-X-DATERANGE") !== 0 ||
+                        line.indexOf(__sp_MARK) < 0
+                    ) {
+                        continue;
+                    }
+                    var a = __sp_attrs(line);
+                    var id = a.ID || line;
+                    if (info.adIdsSeen[id]) {
+                        continue;
+                    }
+                    info.adIdsSeen[id] = true;
+                    var n = Object.keys(info.adIdsSeen).length;
+                    var val = function(key){
+                        return a[key] !== undefined && a[key] !== "" ? a[key] : "absente";
+                    };
+                    __tp_postLog("info",
+                        "🛡️ Infos de pub annoncées par Twitch sur " + info.channel +
+                        " (repère n°" + n + " de cette coupure, vu " +
+                        Math.round((Date.now() - info.adStart) / 1000) + " s après son début)" +
+                        " · durée " + val("DURATION") +
+                        " · durée prévue " + val("PLANNED-DURATION") +
+                        " · nombre de pubs " + val("X-TV-TWITCH-AD-POD-LENGTH") +
+                        " · position " + val("X-TV-TWITCH-AD-POD-POSITION") +
+                        " · type " + val("X-TV-TWITCH-AD-ROLL-TYPE") +
+                        " · ligne brute : " + line.slice(0, 400));
+                }
+            }
+            // La pub en cours d'après les repères de Twitch : « 2 sur 3 »,
+            // et son début / sa fin en heure du PC pour le compte à rebours
+            // du badge. Chaque repère n'apparaît qu'au début de SA pub : la
+            // plus récente est donc celle qui passe. Heure calée sur la
+            // liste elle-même (date du dernier segment), pas sur l'horloge
+            // du PC, qui peut être décalée de celle de Twitch.
+            function __sp_podInfo(info, text){
+                if (!info.adTimes) {
+                    info.adTimes = {};
+                }
+                var lines = __sp_lines(text);
+                var pendingPdt = 0;
+                var lastPdt = 0;
+                var lastDur = 0;
+                var current = null;
+                for (var i = 0; i < lines.length; i++) {
+                    var line = lines[i];
+                    if (line.indexOf("#EXT-X-PROGRAM-DATE-TIME:") === 0) {
+                        pendingPdt = Date.parse(line.substring(25).trim()) || 0;
+                        continue;
+                    }
+                    if (line.indexOf("#EXTINF:") === 0) {
+                        if (pendingPdt) {
+                            lastPdt = pendingPdt;
+                            lastDur = parseFloat(line.substring(8)) || 0;
+                        }
+                        pendingPdt = 0;
+                        continue;
+                    }
+                    if (
+                        line.indexOf("#EXT-X-DATERANGE") !== 0 ||
+                        line.indexOf(__sp_MARK) < 0
+                    ) {
+                        continue;
+                    }
+                    var a = __sp_attrs(line);
+                    var ad = {
+                        id: a.ID || line,
+                        start: Date.parse(a["START-DATE"] || ""),
+                        dur: parseFloat(a.DURATION),
+                        pos: parseInt(a["X-TV-TWITCH-AD-POD-POSITION"], 10),
+                        len: parseInt(a["X-TV-TWITCH-AD-POD-LENGTH"], 10)
+                    };
+                    if (
+                        !current ||
+                        (!isNaN(ad.start) && (isNaN(current.start) || ad.start > current.start))
+                    ) {
+                        current = ad;
+                    }
+                }
+                if (!current) {
+                    return null;
+                }
+                var out = {
+                    pos: isNaN(current.pos) ? 0 : current.pos + 1,
+                    len: current.len > 0 ? current.len : 0,
+                    start: 0,
+                    end: 0
+                };
+                if (current.dur > 0 && !isNaN(current.start)) {
+                    var times = info.adTimes[current.id];
+                    if (!times) {
+                        var elapsed = 0;
+                        if (lastPdt) {
+                            elapsed = (lastPdt + lastDur * 1000 - current.start) / 1000;
+                            if (!(elapsed > 0)) {
+                                elapsed = 0;
+                            }
+                            if (elapsed > current.dur) {
+                                elapsed = current.dur;
+                            }
+                        }
+                        var end = Date.now() + (current.dur - elapsed) * 1000;
+                        times = info.adTimes[current.id] = {
+                            start: end - current.dur * 1000,
+                            end: end
+                        };
+                    }
+                    out.start = times.start;
+                    out.end = times.end;
+                }
+                return out;
+            }
+            // ------------------------------------------------------
+            // OBSERVATION DU RETOUR ANTICIPÉ (rien n'est changé)
+            // ------------------------------------------------------
+            // Aujourd'hui la pub est finie quand plus aucune trace de pub
+            // ne reste dans la liste, soit une trentaine de secondes après
+            // la dernière pub. On note ici, sans rien toucher, quand un
+            // retour plus tôt aurait eu lieu : dès que les derniers
+            // morceaux de la liste sont redevenus du vrai stream. Et on
+            // note s'il se serait trompé (morceau de pub revenu ensuite).
+            var __sp_OBS_TAIL = 3;
+            function __sp_tailState(text){
+                var lines = __sp_lines(text);
+                var live = [];
+                for (var i = 0; i < lines.length; i++) {
+                    if (lines[i].indexOf("#EXTINF") === 0) {
+                        live.push(lines[i].indexOf(",live") >= 0);
+                    }
+                }
+                if (live.length < __sp_OBS_TAIL) {
+                    return null;
+                }
+                return {
+                    live: live.slice(-__sp_OBS_TAIL).every(function(x){ return x; }),
+                    ad: !live[live.length - 1]
+                };
+            }
+            function __sp_observeEnd(info, text, pod){
+                var obs = info.obs;
+                if (!obs) {
+                    obs = info.obs = {
+                        ids: {},
+                        sawAd: false,
+                        at: 0,
+                        podDone: null,
+                        relapseAd: 0,
+                        relapseAdAfter: 0,
+                        relapseNew: 0,
+                        relapseNewAfter: 0
+                    };
+                }
+                var now = Date.now();
+                // Une pub jamais vue : Twitch numérote chacune.
+                var fresh = false;
+                __sp_lines(text).forEach(function(line){
+                    if (line.indexOf("#EXT-X-DATERANGE") !== 0 || line.indexOf(__sp_MARK) < 0) {
+                        return;
+                    }
+                    var id = __sp_attrs(line).ID || line;
+                    if (!obs.ids[id]) {
+                        obs.ids[id] = true;
+                        fresh = true;
+                    }
+                });
+                var tail = __sp_tailState(text);
+                if (!tail) {
+                    return;
+                }
+                if (tail.ad) {
+                    obs.sawAd = true;
+                }
+                if (obs.at) {
+                    if (fresh) {
+                        // Pub suivante annoncée : le vrai retour repasserait
+                        // sur le secours, c'est prévu.
+                        obs.relapseNew++;
+                        if (!obs.relapseNewAfter) {
+                            obs.relapseNewAfter = now - obs.at;
+                        }
+                        obs.at = 0;
+                        obs.podDone = null;
+                    } else if (tail.ad) {
+                        // Morceau de pub revenu sans nouvelle pub : c'est le
+                        // cas où le retour anticipé se serait trompé.
+                        obs.relapseAd++;
+                        if (!obs.relapseAdAfter) {
+                            obs.relapseAdAfter = now - obs.at;
+                        }
+                        obs.at = 0;
+                        obs.podDone = null;
+                    }
+                    return;
+                }
+                // Il faut avoir vu au moins un morceau de pub en fin de liste :
+                // au tout début, Twitch annonce la pub avant ses morceaux.
+                if (obs.sawAd && tail.live) {
+                    var podDone = pod && pod.len && pod.end
+                        ? (pod.pos >= pod.len && now >= pod.end - 2000)
+                        : null;
+                    // Twitch annonce encore une pub à venir : on attend.
+                    if (podDone === false) {
+                        return;
+                    }
+                    obs.at = now;
+                    obs.podDone = podDone;
+                }
+            }
+            // Après un retour anticipé, les vieux repères de pub restent
+            // dans la liste ~30 s : pub suivante (repère jamais vu),
+            // morceau de pub revenu, ou simples restes à nettoyer.
+            function __sp_afterState(info, text){
+                var ids = info.after.ids;
+                var fresh = __sp_lines(text).some(function(line){
+                    if (line.indexOf("#EXT-X-DATERANGE") !== 0 || line.indexOf(__sp_MARK) < 0) {
+                        return false;
+                    }
+                    return !ids[__sp_attrs(line).ID || line];
+                });
+                if (fresh) {
+                    return "new";
+                }
+                var tail = __sp_tailState(text);
+                return tail && tail.ad ? "relapse" : "clean";
+            }
+            // Liste rendue au lecteur après le retour anticipé : sans les
+            // repères de pub, et les vieux morceaux de pub remplacés par du vide.
+            function __sp_cleanAfter(text){
+                var lines = __sp_lines(text);
+                var now = Date.now();
+                var out = [];
+                for (var i = 0; i < lines.length; i++) {
+                    var line = lines[i];
+                    if (line.indexOf("#EXT-X-DATERANGE") === 0 && line.indexOf(__sp_MARK) >= 0) {
+                        continue;
+                    }
+                    if (
+                        i < lines.length - 1 &&
+                        line.indexOf("#EXTINF") === 0 &&
+                        line.indexOf(",live") < 0
+                    ) {
+                        __sp_adSegs[lines[i + 1].trim()] = now;
+                        var comma = line.indexOf(",");
+                        line = (comma >= 0 ? line.substring(0, comma) : line) + ",live";
+                    }
+                    out.push(line);
+                }
+                return out.join(__sp_NL);
+            }
+            function __sp_endAd(info, early){
+                var wasModified = info.usingModified;
+                info.inAd = false;
+                info.stripping = false;
+                info.stripped = 0;
+                info.backupType = null;
+                info.usingModified = false;
+                info.lastReload = Date.now();
+                __tp_postLog("info",
+                    "🛡️ Fin de la pub sur " + info.channel + " (" +
+                    Math.round((Date.now() - info.adStart) / 1000) + " s" +
+                    (early ? ", retour anticipé" : "") + ") : " +
+                    "relance du lecteur" + (wasModified ? " (retour en 2K/4K)" : ""));
+                __sp_post({ type: "spAd", channel: info.channel, active: false, stripping: false });
+                __sp_post({ type: "spPlayer", action: "reload" });
+            }
             async function __sp_processMedia(url, text, info){
                 if (__sp_reloaded) {
                     __sp_reloaded = false;
                     info.lastReload = Date.now();
                 }
-                if (text.indexOf(__sp_MARK) >= 0) {
+                var marked = text.indexOf(__sp_MARK) >= 0;
+                if (info.after) {
+                    var state = marked ? __sp_afterState(info, text) : "gone";
+                    if (state === "clean") {
+                        return __sp_cleanAfter(text);
+                    }
+                    if (state === "gone") {
+                        __tp_postLog("info",
+                            "🛡️ Repères de pub effacés par Twitch sur " + info.channel +
+                            " : le retour anticipé a évité " +
+                            Math.round((Date.now() - info.after.at) / 1000) +
+                            " s de flux de secours");
+                    }
+                    if (state === "relapse") {
+                        // Filet : plus de retour anticipé jusqu'à la vraie fin.
+                        info.noEarly = true;
+                        __tp_postLog("warn",
+                            "🛡️ Retour anticipé trop tôt sur " + info.channel +
+                            " : un morceau de pub est revenu, retour sur le flux de secours" +
+                            " jusqu'à la vraie fin de la coupure");
+                    }
+                    info.after = null;
+                }
+                if (marked) {
                     info.midroll = text.indexOf('"MIDROLL"') >= 0 || text.indexOf('"midroll"') >= 0;
                     if (!info.inAd) {
                         info.inAd = true;
                         info.adStart = Date.now();
                         info.backupType = null;
                         info.blankLogged = false;
+                        info.adIdsSeen = {};
+                        info.adTimes = {};
+                        info.obs = null;
                         __tp_postLog("warn",
                             "🛡️ Pub " + (info.midroll ? "en cours de stream" : "de début de stream") +
                             " sur " + info.channel + " : recherche d'un flux sans pub");
                         __sp_post({ type: "spAd", channel: info.channel, active: true, midroll: info.midroll, stripping: false, backupType: null, quality: "", searching: true });
+                    }
+                    __sp_logAdInfo(info, text);
+                    var pod = __sp_podInfo(info, text);
+                    __sp_observeEnd(info, text, pod);
+                    // Retour anticipé : les derniers morceaux sont du vrai
+                    // stream et Twitch n'annonce plus de pub à venir.
+                    if (info.obs && info.obs.at && !info.noEarly) {
+                        var seenIds = info.obs.ids;
+                        info.obs = null;
+                        __sp_endAd(info, true);
+                        info.after = { ids: seenIds, at: Date.now() };
+                        return __sp_cleanAfter(text);
                     }
                     // Pub de début : Twitch veut voir qu'on la charge,
                     // on en télécharge un segment par liste.
@@ -32971,28 +33762,21 @@ dashboardButton.style.visibility =
                         midroll: info.midroll,
                         stripping: info.stripping,
                         backupType: backup.text ? info.backupType : null,
-                        quality: backup.text ? info.backupLabel : ""
+                        quality: backup.text ? info.backupLabel : "",
+                        pod: pod
                     });
-                } else if (info.inAd) {
-                    // Relance complète, comme Vaft : les morceaux servis
-                    // pendant la pub n'ont pas tout à fait la même durée
-                    // de son et d'image que le stream, et une simple
-                    // pause/lecture laissait le décalage jusqu'au F5.
-                    // La relance remet tout à zéro (et rend la 2K/4K si
-                    // le lecteur était passé en H.264).
-                    var wasModified = info.usingModified;
-                    info.inAd = false;
-                    info.stripping = false;
-                    info.stripped = 0;
-                    info.backupType = null;
-                    info.usingModified = false;
-                    info.lastReload = Date.now();
-                    __tp_postLog("info",
-                        "🛡️ Fin de la pub sur " + info.channel + " (" +
-                        Math.round((Date.now() - info.adStart) / 1000) + " s) : " +
-                        "relance du lecteur" + (wasModified ? " (retour en 2K/4K)" : ""));
-                    __sp_post({ type: "spAd", channel: info.channel, active: false, stripping: false });
-                    __sp_post({ type: "spPlayer", action: "reload" });
+                } else {
+                    info.noEarly = false;
+                    if (info.inAd) {
+                        // Relance complète, comme Vaft : les morceaux servis
+                        // pendant la pub n'ont pas tout à fait la même durée
+                        // de son et d'image que le stream, et une simple
+                        // pause/lecture laissait le décalage jusqu'au F5.
+                        // La relance remet tout à zéro (et rend la 2K/4K si
+                        // le lecteur était passé en H.264).
+                        info.obs = null;
+                        __sp_endAd(info, false);
+                    }
                 }
                 return text;
             }
@@ -34130,15 +34914,24 @@ dashboardButton.style.visibility =
     // chaîne.
     var SP_STREAM_STATS_KEY = 'twitchProxyAdblockStream';
 
+    // v: 2 = sans les pubs de début. Un compte sans ce numéro vient
+    // d'une version qui les comptait : il survivait au F5 et n'était
+    // jamais purgé, on repart de zéro.
+    var SP_STREAM_STATS_VERSION = 2;
+
     function spLoadStreamStats() {
         try {
             var saved = JSON.parse(sessionStorage.getItem(SP_STREAM_STATS_KEY) || 'null');
-            if (saved && typeof saved.count === 'number') {
+            if (
+                saved &&
+                saved.v === SP_STREAM_STATS_VERSION &&
+                typeof saved.count === 'number'
+            ) {
                 saved.adStart = 0;
                 return saved;
             }
         } catch (e) {}
-        return { channel: null, count: 0, ms: 0, adStart: 0 };
+        return { v: SP_STREAM_STATS_VERSION, channel: null, count: 0, ms: 0, adStart: 0, watchMs: 0 };
     }
 
     var spStreamStats = spLoadStreamStats();
@@ -34150,11 +34943,25 @@ dashboardButton.style.visibility =
     }
 
     function spResetStreamStats(channel) {
-        spStreamStats = { channel: channel || null, count: 0, ms: 0, adStart: 0 };
+        spStreamStats = { v: SP_STREAM_STATS_VERSION, channel: channel || null, count: 0, ms: 0, adStart: 0, watchMs: 0 };
         spSaveStreamStats();
+    }
+    function spAddStreamWatch(channel, ms) {
+        if (!spStreamStats || !channel) {
+            return;
+        }
+        if (spStreamStats.channel !== channel) {
+            spResetStreamStats(channel);
+        }
+        spStreamStats.watchMs = (spStreamStats.watchMs || 0) + ms;
+        spSaveStreamStats();
+        renderAdblockStats();
     }
 
     var AD_BLOCKS_MAX = 500;
+
+    // Pub en cours lancée par le streamer (et non pub de début).
+    var spAdMidroll = false;
 
     // Coupure en cours, retrouvée par sa clé : pageStats peut être
     // remplacé entre deux messages (fusion avec un autre onglet).
@@ -34184,6 +34991,15 @@ dashboardButton.style.visibility =
         var totals = pageStats.totals;
         var streamer;
         var entry;
+        if (data.active) {
+            spAdMidroll = !!data.midroll;
+        }
+        // Pub de début : bloquée, mais pas comptée.
+        if (data.active && !spAd.active && !data.midroll) {
+            spCurrentAdKey = null;
+            spStreamStats.adStart = 0;
+            return;
+        }
         if (data.active && !spAd.active) {
             var now = Date.now();
             spStreamStats.count++;
@@ -34212,6 +35028,19 @@ dashboardButton.style.visibility =
             if (!entry || data.searching) {
                 return;
             }
+            // Comptée au premier message comme pub en cours de stream,
+            // puis annoncée comme pub de début : on la retire des
+            // compteurs (purgePrerollAds s'occupe des stats).
+            if (!data.midroll) {
+                entry.midroll = false;
+                purgePrerollAds(pageStats);
+                spStreamStats.count = Math.max(0, spStreamStats.count - 1);
+                spStreamStats.adStart = 0;
+                spCurrentAdKey = null;
+                spSaveStreamStats();
+                scheduleStatsSave();
+                return;
+            }
             var backup = data.backupType || 'blank';
             var quality = data.backupType ? (data.quality || '') : '';
             if (
@@ -34231,6 +35060,11 @@ dashboardButton.style.visibility =
             totals.adsBlockedMsGlobal = (totals.adsBlockedMsGlobal || 0) + ms;
             streamer = getStreamerStats(channel);
             streamer.adsBlockedMs = (streamer.adsBlockedMs || 0) + ms;
+            // La médaille juge la chaîne : la pub de début dépend de quand
+            // on ouvre le stream, pas du streamer.
+            if (spAdMidroll) {
+                streamer.adShareAdMs = (streamer.adShareAdMs || 0) + ms;
+            }
             entry = spCurrentAdEntry(channel);
             if (entry) {
                 entry.ms = ms;
@@ -34256,6 +35090,83 @@ dashboardButton.style.visibility =
         return Math.floor(minutes / 60) + ' h ' + pad2(minutes % 60);
     }
 
+    // Part de pub dans le temps regardé, en %. null = pas calculable.
+    function adSharePercent(adMs, watchMs) {
+        if (!(watchMs > 0) || (adMs || 0) > watchMs) {
+            return null;
+        }
+        return (adMs || 0) / watchMs * 100;
+    }
+    // « 0,8 % » sous 10 %, « 14 % » au-dessus.
+    function formatAdShare(pct) {
+        if (pct === null) {
+            return '—';
+        }
+        if (pct > 0 && pct < 10) {
+            return String(Math.round(pct * 10) / 10).replace('.', ',') + ' %';
+        }
+        return Math.round(pct) + ' %';
+    }
+    var AD_SHARE_HIGH = 15;
+
+    // ------------------------------------------------------------
+    // Médaille d'une chaîne selon sa part de pub
+    // ------------------------------------------------------------
+    //
+    // Calculée sur un compteur à part (adShareAdMs / adShareWatchMs),
+    // démarré avec elle : les pubs étaient comptées bien avant le
+    // temps regardé, les mélanger aurait donné des 💩 injustes. Rien
+    // avant 30 min regardées : la pub d'ouverture ferait passer
+    // n'importe quelle chaîne pour un enfer de pubs.
+    var AD_MEDAL_MIN_WATCH_MS = 30 * 60 * 1000;
+
+    var AD_MEDALS = [
+        { max: 0, zero: true, icon: '🏆', label: 'Zéro pub' },
+        { max: 3, icon: '🥇', label: 'Très peu de pub' },
+        { max: 7, icon: '🥈', label: 'Peu de pub' },
+        { max: 12, icon: '🥉', label: 'Pub raisonnable' },
+        { max: 20, icon: '', label: 'Pas mal de pub' },
+        { max: Infinity, icon: '💩', label: 'Beaucoup de pub' }
+    ];
+
+    function adShareOf(s) {
+        return s ? adSharePercent(s.adShareAdMs || 0, s.adShareWatchMs || 0) : null;
+    }
+
+    function adMedalFor(s) {
+        if (!s || (s.adShareWatchMs || 0) < AD_MEDAL_MIN_WATCH_MS) {
+            return null;
+        }
+        var pct = adShareOf(s);
+        if (pct === null) {
+            return null;
+        }
+        for (var i = 0; i < AD_MEDALS.length; i++) {
+            if (AD_MEDALS[i].zero ? pct === 0 : pct < AD_MEDALS[i].max) {
+                return AD_MEDALS[i];
+            }
+        }
+        return null;
+    }
+
+    // La médaille seule, avec son infobulle, pour les tableaux du
+    // dashboard. Vide tant qu'il n'y en a pas.
+    function adMedalHTML(s) {
+        var medal = adMedalFor(s);
+        if (!medal || !medal.icon) {
+            return '';
+        }
+        return (
+            '<span class="tp9-ad-medal" data-tp9-tip="' +
+                escapeHTML(medal.icon + ' ' + medal.label) + '"' +
+                ' data-tp9-tip-sub="' + escapeHTML(
+                    medal.zero
+                        ? 'Jamais de pub pendant que tu regardes.'
+                        : formatAdShare(adShareOf(s)) + ' de pub sur ' +
+                            formatDuration(s.adShareWatchMs) + ' regardées.'
+                ) + '">' + medal.icon + '</span>'
+        );
+    }
     function renderAdblockStats() {
         if (!dashboard) {
             return;
@@ -34274,8 +35185,39 @@ dashboardButton.style.visibility =
             current ? spStreamStats.count : 0;
         card.querySelector('.tp9-ab-time').textContent =
             spFormatAdTime(current ? spStreamStats.ms : 0);
+        // Chaîne affichée, depuis toujours : ni un F5 ni un changement
+        // de chaîne ne remettent ces chiffres à zéro.
+        var channelNow = getTestChannel();
+        var channelStats = channelNow ? pageStats.streamers[channelNow] : null;
         card.querySelector('.tp9-ab-total').textContent =
-            pageStats.totals.adsBlockedGlobal || 0;
+            channelStats ? (channelStats.adsBlocked || 0) : 0;
+        var ratio = card.querySelector('.tp9-ab-ratio');
+        if (ratio) {
+            var adMs = channelStats ? (channelStats.adShareAdMs || 0) : 0;
+            var watchMs = channelStats ? (channelStats.adShareWatchMs || 0) : 0;
+            var pct = adSharePercent(adMs, watchMs);
+            var medal = adMedalFor(channelStats);
+            ratio.querySelector('.tp9-ab-ratio-text').innerHTML =
+                watchMs < 1000
+                    ? 'Le compte démarre avec la lecture'
+                    : adMs
+                        ? '<b>' + spFormatAdTime(adMs) + '</b> de pub sur <b>' +
+                            spFormatAdTime(watchMs) + '</b> regardées'
+                        : 'Aucune pub sur <b>' + spFormatAdTime(watchMs) + '</b> regardées';
+            ratio.querySelector('.tp9-ab-ratio-medal').textContent =
+                medal ? medal.icon : '';
+            ratio.querySelector('.tp9-ab-ratio-note').textContent =
+                watchMs < 1000
+                    ? ''
+                    : medal
+                        ? (medal.icon ? medal.icon + ' ' : '') + medal.label + ' sur cette chaîne'
+                        : 'Médaille dans ' +
+                            Math.max(1, Math.ceil((AD_MEDAL_MIN_WATCH_MS - watchMs) / 60000)) + ' min';
+            ratio.querySelector('.tp9-ab-ratio-pct').textContent = formatAdShare(pct);
+            ratio.querySelector('.tp9-ab-ratio-fill').style.width =
+                Math.min(100, pct || 0).toFixed(1) + '%';
+            ratio.classList.toggle('tp9-ab-ratio-high', pct !== null && pct >= AD_SHARE_HIGH);
+        }
     }
 
     // ------------------------------------------------------------
@@ -34313,6 +35255,15 @@ dashboardButton.style.visibility =
             '.tp9-sp-badge-q{flex:none;padding:1px 6px;border-radius:5px;' +
             'background:rgba(0,229,122,.18);color:#7dffbe;font-size:11px;font-weight:700;' +
             'font-variant-numeric:tabular-nums}' +
+            '.tp9-sp-badge-title:empty,.tp9-sp-badge-q:empty,.tp9-sp-badge-time:empty{display:none}' +
+            '.tp9-sp-badge-time{flex:none;min-width:24px;text-align:right;color:#9fe8c4;' +
+            'font-size:11px;font-weight:700;font-variant-numeric:tabular-nums}' +
+            '.tp9-sp-badge-bar{display:none;position:absolute;left:14px;right:14px;bottom:3px;height:2px;' +
+            'border-radius:2px;background:rgba(255,255,255,.12);overflow:hidden}' +
+            '.tp9-sp-badge-bar i{display:block;width:0;height:100%;border-radius:inherit;' +
+            'background:#00e57a;transition:width .25s linear}' +
+            '.tp9-sp-badge-timed{padding-bottom:8px}' +
+            '.tp9-sp-badge-timed .tp9-sp-badge-bar{display:block}' +
             '@keyframes tp9-sp-badge-in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}' +
             '@keyframes tp9-sp-badge-pulse{0%{box-shadow:0 0 0 0 rgba(0,229,122,.6)}' +
             '70%{box-shadow:0 0 0 7px rgba(0,229,122,0)}100%{box-shadow:0 0 0 0 rgba(0,229,122,0)}}' +
@@ -34320,7 +35271,25 @@ dashboardButton.style.visibility =
         (document.head || document.documentElement).appendChild(style);
     }
 
+    // Dernier message reçu du Worker : le badge se redessine quatre fois
+    // par seconde entre deux messages, pour le compte à rebours.
+    var spBadgeData = null;
+
+    // Délai habituel entre la fin de la dernière pub et la relance du
+    // lecteur : le Worker attend de voir trois morceaux (2 s chacun) de
+    // vrai stream en fin de liste. C'est une estimation, d'où le « … »
+    // quand elle est dépassée plutôt qu'un « 0 s » figé.
+    var SP_RELOAD_AFTER_AD_MS = 6000;
+    var spBadgeTimer = null;
+    var spBadgeProgress = null;
+
     function spHideBadge() {
+        spBadgeData = null;
+        spBadgeProgress = null;
+        if (spBadgeTimer) {
+            clearInterval(spBadgeTimer);
+            spBadgeTimer = null;
+        }
         if (spBadge) {
             spBadge.remove();
             spBadge = null;
@@ -34345,29 +35314,106 @@ dashboardButton.style.visibility =
         if (!spBadge) {
             spBadge = document.createElement('div');
             spBadge.className = 'tp9-sp-badge';
+            spBadge.innerHTML =
+                '<span class="tp9-sp-badge-dot"></span>' +
+                '<span class="tp9-sp-badge-title"></span>' +
+                '<span class="tp9-sp-badge-sub"></span>' +
+                '<span class="tp9-sp-badge-q"></span>' +
+                '<span class="tp9-sp-badge-time"></span>' +
+                '<span class="tp9-sp-badge-bar"><i></i></span>';
         }
         // Twitch reconstruit son lecteur (relance en 2K/4K) : le badge
         // est reposé dans le nouveau à chaque relecture de la liste.
         if (spBadge.parentNode !== player) {
             player.appendChild(spBadge);
         }
-        var title = data.midroll ? 'Pub bloquée' : 'Pub de début bloquée';
+        spBadgeData = data;
+        spRenderBadge();
+        if (!spBadgeTimer) {
+            spBadgeTimer = setInterval(spRenderBadge, 250);
+        }
+    }
+
+    function spSetBadgeText(selector, text) {
+        var el = spBadge.querySelector(selector);
+        if (el && el.textContent !== text) {
+            el.textContent = text;
+        }
+    }
+
+    // « Pub 2/3 · intégré 720p60 12 s », et une barre sous le texte qui
+    // se remplit pendant la pub en cours puis repart de zéro.
+    function spRenderBadge() {
+        var data = spBadgeData;
+        if (!spBadge || !data) {
+            return;
+        }
+        var pod = data.pod || null;
+        var now = Date.now();
+        var pos = pod && pod.pos ? pod.pos : 0;
+        var len = pod && pod.len ? pod.len : 0;
+        var timed = !!(pod && pod.end > pod.start);
+        var ended = timed && now >= pod.end;
+        var title;
         var sub;
         var quality = '';
+        var time = '';
+        var progress = null;
+        var kind = data.midroll ? '(midroll)' : '(preroll)';
         if (data.searching) {
-            title = 'Pub détectée';
+            title = 'Pub ' + kind + ' détectée';
             sub = 'recherche…';
-        } else if (data.backupType) {
-            sub = SP_BADGE_TYPES[data.backupType] || data.backupType;
-            quality = data.quality || '';
+        } else if (ended && pos && len && pos >= len) {
+            // Les pubs sont finies, mais Twitch garde leur trace une
+            // trentaine de secondes : le flux de secours tient jusque-là.
+            title = 'Pubs terminées';
+            var reloadIn = Math.ceil((pod.end + SP_RELOAD_AFTER_AD_MS - now) / 1000);
+            if (reloadIn >= 1) {
+                sub = 'relance du lecteur dans';
+                time = reloadIn + ' s';
+            } else {
+                sub = 'relance du lecteur…';
+            }
         } else {
-            sub = 'image vide';
+            if (pos && len) {
+                // Entre deux pubs, la suivante n'est pas encore annoncée.
+                title = 'Pub ' + kind + ' ' + (ended ? Math.min(pos + 1, len) : pos) + '/' + len;
+            } else {
+                title = 'Pub ' + kind + ' bloquée';
+            }
+            if (data.backupType) {
+                sub = SP_BADGE_TYPES[data.backupType] || data.backupType;
+                quality = data.quality || '';
+            } else {
+                sub = 'image vide';
+            }
+            if (timed && !ended) {
+                time = Math.max(1, Math.ceil((pod.end - now) / 1000)) + ' s';
+                progress = (now - pod.start) / (pod.end - pod.start);
+            } else if (ended && pos && len) {
+                progress = 0;
+            }
         }
-        spBadge.innerHTML =
-            '<span class="tp9-sp-badge-dot"></span>' +
-            '<span>🛡️ ' + escapeHTML(title) + '</span>' +
-            '<span class="tp9-sp-badge-sub">· ' + escapeHTML(sub) + '</span>' +
-            (quality ? '<span class="tp9-sp-badge-q">' + escapeHTML(quality) + '</span>' : '');
+        spSetBadgeText('.tp9-sp-badge-title', '🛡️ ' + title);
+        spSetBadgeText('.tp9-sp-badge-sub', '· ' + sub);
+        spSetBadgeText('.tp9-sp-badge-q', quality);
+        spSetBadgeText('.tp9-sp-badge-time', time);
+        spBadge.classList.toggle('tp9-sp-badge-timed', progress !== null);
+        var fill = spBadge.querySelector('.tp9-sp-badge-bar i');
+        if (fill && progress !== null) {
+            progress = Math.max(0, Math.min(1, progress));
+            // Nouvelle pub : la barre repart de zéro d'un coup, sans
+            // glisser à reculons.
+            if (spBadgeProgress !== null && progress < spBadgeProgress - 0.05) {
+                fill.style.transition = 'none';
+                fill.style.width = (progress * 100).toFixed(1) + '%';
+                void fill.offsetWidth;
+                fill.style.transition = '';
+            } else {
+                fill.style.width = (progress * 100).toFixed(1) + '%';
+            }
+        }
+        spBadgeProgress = progress;
     }
 
     // Lecteur qui tourne en rond sans avancer : pause/lecture, au plus
