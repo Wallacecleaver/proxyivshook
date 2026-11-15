@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch HLS Proxy
 // @namespace    twitch-proxy-ivs
-// @version      1.12.3
+// @version      1.12.4
 // @author       razeNFR
 // @description  Twitch Guard : bloque les pubs Twitch (via proxys ou en mode Adblock sans proxy), retour arrière dans le direct et dashboard de statistiques
 // @match        https://www.twitch.tv/*
@@ -14,6 +14,8 @@
 // ==/UserScript==
 
 // ==Changelog==
+// 1.12.4
+// - Masquage instantané du HUD en mode « Bloqueur de pub (Experimental) » dès que la souris quitte le lecteur (0 ms de délai), exactement comme sur le lecteur classique de Twitch || Instant HUD auto-hide in "Ad blocker (Experimental)" mode as soon as the mouse leaves the player (0 ms delay), matching Twitch's native player
 // 1.12.3
 // - Correctif du freeze de la page d'accueil Twitch et des pages hors chaîne (Parcourir, Recherche, etc.) : suppression du parcours synchrone de #root (jusqu'à 300 000 nœuds React Fiber) et des relances Adblock sur le carrousel d'accueil, respect de la politique d'autoplay muet du navigateur sur le carrousel et les cartes d'aperçu (éliminant les boucles NotAllowedError), et désactivation des scans DOM complets de <main> et recalculs de layout hors page de chaîne ou de VOD || Fixed Twitch homepage and non-channel page freezes (Browse, Search, etc.): eliminated synchronous #root React Fiber walks (up to 300,000 nodes) and Adblock reloads on the frontpage carousel, preserved browser muted-autoplay policy on the homepage carousel and preview cards (preventing NotAllowedError retry loops), and skipped full <main> DOM scans and layout reflows outside channel and VOD pages
 // 1.12.2
@@ -105,7 +107,7 @@
         Math.random().toString(36).substring(2, 9);
 
     // Doit être tenu à jour avec le @version de l'en-tête du script.
-    var CURRENT_VERSION = '1.12.3';
+    var CURRENT_VERSION = '1.12.4';
 
     // Même URL que @updateURL : contient toujours la dernière version
     // publiée. On la relit nous-même (plutôt que de compter sur le
@@ -11672,7 +11674,7 @@ function showAddProxyForm() {
         .video-player.tp9-exp-hud-idle .tp9dvr-fallback {
             opacity: 0 !important;
             pointer-events: none !important;
-            transition: opacity .18s ease !important;
+            transition: opacity .05s ease-out !important;
         }
         .video-player.tp9-exp-hud-idle .player-overlay-background--theme-dark {
             background: transparent !important;
@@ -42934,7 +42936,9 @@ dashboardButton.style.visibility = 'hidden';
     var expVodLastClientX = -9999;
     var expVodLastClientY = -9999;
     var expVodLastHudWakeAt = 0;
+    var expVodLastKeyWakeAt = 0;
     var expVodPointerLeftAt = 0;
+    var expVodHudIdleTimer = null;
 
     var expVodStartupGateChannel = null;
     var expVodStartupDeadline = 0;
@@ -45397,6 +45401,23 @@ dashboardButton.style.visibility = 'hidden';
         }
     }
 
+    function expVodScheduleHudIdleCheck(delayMs) {
+        if (expVodHudIdleTimer) {
+            clearTimeout(expVodHudIdleTimer);
+            expVodHudIdleTimer = null;
+        }
+        if (typeof setTimeout !== 'function') {
+            return;
+        }
+        expVodHudIdleTimer = setTimeout(function () {
+            expVodHudIdleTimer = null;
+            expVodSyncHudIdle();
+        }, Math.max(20, delayMs || 0));
+        if (expVodHudIdleTimer && typeof expVodHudIdleTimer.unref === 'function') {
+            expVodHudIdleTimer.unref();
+        }
+    }
+
     function expVodSyncHudIdle() {
         var player = expVodFindVideoPlayerEl();
         if (!player || !player.classList) {
@@ -45424,7 +45445,7 @@ dashboardButton.style.visibility = 'hidden';
         var now = Date.now();
         var shouldIdle = expVodPointerInPlayer
             ? ((now - expVodLastHudWakeAt) >= (expVodHoveringControls ? 3200 : 2400))
-            : ((now - expVodPointerLeftAt) >= 180 && (now - expVodLastHudWakeAt) >= 350);
+            : (!expVodLastKeyWakeAt || (now - expVodLastKeyWakeAt) >= 1500);
         var wasIdle = player.classList.contains('tp9-exp-hud-idle');
         if (shouldIdle !== wasIdle) {
             player.classList.toggle('tp9-exp-hud-idle', shouldIdle);
@@ -45465,29 +45486,56 @@ dashboardButton.style.visibility = 'hidden';
                 expVodHoveringControls = inControls;
                 expVodLastHudWakeAt = now;
                 expVodClearHudIdle();
+                expVodScheduleHudIdleCheck(inControls ? 3220 : 2420);
             } else {
                 if (expVodPointerInPlayer) {
                     expVodPointerLeftAt = now;
                 }
                 expVodPointerInPlayer = false;
                 expVodHoveringControls = false;
+                expVodLastKeyWakeAt = 0;
                 expVodSyncHudIdle();
             }
         }, true);
         document.addEventListener('mouseout', function (e) {
-            if (e && !e.relatedTarget && !e.toElement) {
+            if (!e) return;
+            var fromEl = e.target && e.target.nodeType === 1 ? e.target : (e.target && e.target.parentElement);
+            if (fromEl && fromEl.isConnected === false) {
+                return;
+            }
+            var toRaw = e.relatedTarget || e.toElement || null;
+            var toEl = toRaw && toRaw.nodeType === 1 ? toRaw : (toRaw && toRaw.parentElement);
+            var leftWindow = !toRaw;
+            var leftPlayer = Boolean(
+                fromEl &&
+                fromEl.closest &&
+                fromEl.closest('.video-player') &&
+                (!toEl || !toEl.closest || !toEl.closest('.video-player, .tp9dvr-menu'))
+            );
+            if (leftWindow || leftPlayer) {
                 expVodPointerInPlayer = false;
                 expVodHoveringControls = false;
+                expVodLastKeyWakeAt = 0;
                 expVodPointerLeftAt = Date.now();
                 expVodSyncHudIdle();
             }
         }, true);
+        if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+            window.addEventListener('blur', function () {
+                expVodPointerInPlayer = false;
+                expVodHoveringControls = false;
+                expVodLastKeyWakeAt = 0;
+                expVodPointerLeftAt = Date.now();
+                expVodSyncHudIdle();
+            });
+        }
         document.addEventListener('pointerdown', function (e) {
             var t = e && e.target && e.target.nodeType === 1 ? e.target : (e && e.target && e.target.parentElement);
             if (t && t.closest && t.closest('.video-player, .tp9dvr-menu')) {
                 expVodPointerInPlayer = true;
                 expVodLastHudWakeAt = Date.now();
                 expVodClearHudIdle();
+                expVodScheduleHudIdleCheck(3220);
             }
         }, true);
         document.addEventListener('wheel', function (e) {
@@ -45496,6 +45544,7 @@ dashboardButton.style.visibility = 'hidden';
                 expVodPointerInPlayer = true;
                 expVodLastHudWakeAt = Date.now();
                 expVodClearHudIdle();
+                expVodScheduleHudIdleCheck(2420);
             }
         }, { capture: true, passive: true });
         document.addEventListener('keydown', function (e) {
@@ -45506,8 +45555,11 @@ dashboardButton.style.visibility = 'hidden';
                 }
             }
             if (expVodIsPlayingVod()) {
-                expVodLastHudWakeAt = Date.now();
+                var nowKey = Date.now();
+                expVodLastHudWakeAt = nowKey;
+                expVodLastKeyWakeAt = nowKey;
                 expVodClearHudIdle();
+                expVodScheduleHudIdleCheck(expVodPointerInPlayer ? 2420 : 1520);
             }
         }, true);
     }
