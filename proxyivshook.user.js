@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch HLS Proxy
 // @namespace    twitch-proxy-ivs
-// @version      1.12.4
+// @version      1.12.5
 // @author       razeNFR
 // @description  Twitch Guard : bloque les pubs Twitch (via proxys ou en mode Adblock sans proxy), retour arrière dans le direct et dashboard de statistiques
 // @match        https://www.twitch.tv/*
@@ -14,6 +14,8 @@
 // ==/UserScript==
 
 // ==Changelog==
+// 1.12.5
+// - Correctif de la double barre de progression pour les abonnés à la chaîne et les membres Turbo : masque automatiquement le retour arrière natif de Twitch (barre + temps écoulé) quand celui du script est actif, pour ne garder qu'une seule barre || Fixed the double progress bar for channel subscribers and Turbo members: automatically hides Twitch's native rewind (bar + elapsed time) when the script's rewind is active, so only one bar remains
 // 1.12.4
 // - Masquage instantané du HUD en mode « Bloqueur de pub (Experimental) » dès que la souris quitte le lecteur (0 ms de délai), exactement comme sur le lecteur classique de Twitch || Instant HUD auto-hide in "Ad blocker (Experimental)" mode as soon as the mouse leaves the player (0 ms delay), matching Twitch's native player
 // 1.12.3
@@ -107,7 +109,7 @@
         Math.random().toString(36).substring(2, 9);
 
     // Doit être tenu à jour avec le @version de l'en-tête du script.
-    var CURRENT_VERSION = '1.12.4';
+    var CURRENT_VERSION = '1.12.5';
 
     // Même URL que @updateURL : contient toujours la dernière version
     // publiée. On la relit nous-même (plutôt que de compter sur le
@@ -11655,6 +11657,16 @@ function showAddProxyForm() {
         }
         .tp9dvr-native-bar .tp9dvr-menu { z-index: 10; max-height: 55vh; }
         .tp9dvr-native-bar .tp9dvr-seek:focus-visible { outline: 2px solid white; outline-offset: 2px; }
+        /* Abonnés / Turbo : Twitch ajoute son propre retour arrière
+           (seekbar + temps écoulé) sous le nôtre. Le conteneur visé
+           est celui qui contient leur seekbar sans aucun bouton ni
+           notre barre ; leurs noms de classes générés ne sont pas
+           stables. Limité aux lecteurs où notre barre est montée :
+           sans elle, celle de Twitch reste disponible. Règle CSS et
+           non style inline, pour survivre aux remontages React. */
+        .video-player:has(.tp9dvr-native-bar) [data-a-target="player-controls"] div:has([data-a-target="player-seekbar"]):not(:has(button, .tp9dvr-native-bar, .tp9dvr-native-info)) {
+            display: none !important;
+        }
         .video-player:not(.tp9-exp-hud-idle) .video-player__overlay:has(.tp9dvr-native-bar:hover, .tp9dvr-native-bar:focus-within, .tp9dvr-native-info:hover, .tp9dvr-native-info:focus-within, .tp9dvr-fallback-left:hover, .tp9dvr-fallback-left:focus-within, .tp9dvr-menu-on) > .tw-transition {
             opacity: 1 !important;
         }
@@ -15997,11 +16009,17 @@ function showAddProxyForm() {
             if (typeof cleanupChatInputSlowModeLayout === 'function') {
                 cleanupChatInputSlowModeLayout();
             }
+            if (typeof restoreAllBigEmoteSources === 'function') {
+                restoreAllBigEmoteSources();
+            }
             if (typeof sweepChatPromoCarousel === 'function') {
                 sweepChatPromoCarousel();
             }
             if (typeof sweepChatTopBanners === 'function') {
                 sweepChatTopBanners();
+            }
+            if (typeof ensureChatBannerObserver === 'function') {
+                ensureChatBannerObserver();
             }
             return;
         }
@@ -16050,6 +16068,9 @@ function showAddProxyForm() {
         }
         if (typeof sweepChatTopBanners === 'function') {
             sweepChatTopBanners();
+        }
+        if (typeof ensureChatBannerObserver === 'function') {
+            ensureChatBannerObserver();
         }
         if (typeof sweepOfflineSidebarChannels === 'function') {
             sweepOfflineSidebarChannels();
@@ -27493,17 +27514,10 @@ dashboardButton.style.visibility = 'hidden';
                 display: none !important;
             }
             body.tp9-bttv-close-banners .tp9-chat-banner-hidden,
+            body.tp9-bttv-close-banners .community-highlight-stack__card--wide:has([data-test-selector*="hype-train" i], [data-a-target*="hype-train" i], [class*="hype-train" i], [data-test-selector*="celebration" i], [data-a-target*="celebration" i], [data-test-selector*="poll" i], [data-a-target*="poll" i], [data-test-selector*="prediction" i], [data-a-target*="prediction" i], [data-a-target="chat-pinned-message"], [data-test-selector*="pinned-chat" i], [class*="pinned-chat" i]),
+            body.tp9-bttv-close-banners [class*="community-highlight-stack__card" i]:has([data-test-selector*="hype-train" i], [data-a-target*="hype-train" i], [class*="hype-train" i], [data-test-selector*="celebration" i], [data-a-target*="celebration" i], [data-test-selector*="poll" i], [data-a-target*="poll" i], [data-test-selector*="prediction" i], [data-a-target*="prediction" i], [data-a-target="chat-pinned-message"], [data-test-selector*="pinned-chat" i], [class*="pinned-chat" i]),
             body.tp9-bttv-close-banners [data-test-selector="community-prediction-highlight-header"],
-            body.tp9-bttv-close-banners [data-test-selector*="community-prediction" i],
-            body.tp9-bttv-close-banners [data-a-target*="prediction" i],
-            body.tp9-bttv-close-banners [data-test-selector*="poll" i],
-            body.tp9-bttv-close-banners [data-a-target*="poll" i],
-            body.tp9-bttv-close-banners [data-test-selector*="hype-train" i],
-            body.tp9-bttv-close-banners [data-a-target*="hype-train" i],
-            body.tp9-bttv-close-banners [class*="hype-train" i],
-            body.tp9-bttv-close-banners [data-a-target="chat-pinned-message"],
-            body.tp9-bttv-close-banners [data-test-selector*="pinned-chat" i],
-            body.tp9-bttv-close-banners [class*="pinned-chat" i] {
+            body.tp9-bttv-close-banners [data-a-target="chat-pinned-message"] {
                 display: none !important;
             }
             .tp9-emote {
@@ -27567,6 +27581,7 @@ dashboardButton.style.visibility = 'hidden';
                 width: auto !important;
                 max-width: none !important;
                 object-fit: contain !important;
+                image-rendering: auto !important;
                 margin: 2px 3px !important;
             }
             body.tp9-bttv-big-emotes .tp9-msg-only-emotes .text-fragment,
@@ -46874,6 +46889,9 @@ dashboardButton.style.visibility = 'hidden';
     var bttvChatObserver = null;
     var bttvChatResizeObserver = null;
     var bttvObservedChatNode = null;
+    var bttvChatBannerObserver = null;
+    var bttvObservedBannerRoot = null;
+    var bttvBannerSweepTimer = null;
     var bttvLastSpamNorm = '';
     var bttvLastSpamEl = null;
     var bttvLastSpamCount = 1;
@@ -48620,6 +48638,74 @@ dashboardButton.style.visibility = 'hidden';
     var UNICODE_EMOJI_DETECT_RE = /(?:\p{Extended_Pictographic}|\p{Emoji_Presentation}|[\u2600-\u27BF]|[\uD83C-\uDBFF][\uDC00-\uDFFF])/u;
     var UNICODE_EMOJI_STRIP_RE = /(?:\p{Extended_Pictographic}|\p{Emoji_Presentation}|\p{Emoji_Modifier}|[\u2600-\u27BF]|[\uD83C-\uDBFF][\uDC00-\uDFFF]|[\uFE00-\uFE0F\u200D\u20E3]|[\u{1F1E6}-\u{1F1FF}]|[\u{E0020}-\u{E007F}])/gu;
 
+    function promoteEmoteScaleUrl(url) {
+        if (!url || typeof url !== 'string') return '';
+        var u = url.trim();
+        if (!u) return '';
+        if (/\/(?:1|2)\.0(\?|$)/.test(u)) {
+            return u.replace(/\/(?:1|2)\.0(\?|$)/, '/3.0$1');
+        }
+        if (/([\/_])(?:1|2)x\.(webp|gif|png|avif)(\?|$)/i.test(u)) {
+            return u.replace(/([\/_])(?:1|2)x\.(webp|gif|png|avif)(\?|$)/i, '$13x.$2$3');
+        }
+        if (/(cdn\.frankerfacez\.com\/emoticon\/\d+\/)(?:1|2)(\?|$)/i.test(u)) {
+            return u.replace(/(cdn\.frankerfacez\.com\/emoticon\/\d+\/)(?:1|2)(\?|$)/i, '$14$2');
+        }
+        return u;
+    }
+
+    function resolveNativeEmoteBigUrl(curSrc, curSrcset) {
+        var bestUrl = '';
+        var bestScale = 0;
+        if (curSrcset && typeof curSrcset === 'string') {
+            var entries = curSrcset.split(',');
+            for (var i = 0; i < entries.length; i++) {
+                var part = entries[i].trim();
+                if (!part) continue;
+                var tokens = part.split(/\s+/);
+                var candUrl = tokens[0] || '';
+                if (!candUrl) continue;
+                var scale = 1;
+                if (tokens[1]) {
+                    var sm = tokens[1].match(/^(\d+(?:\.\d+)?)x$/i);
+                    if (sm) scale = parseFloat(sm[1]) || 1;
+                }
+                if (scale >= bestScale) {
+                    bestScale = scale;
+                    bestUrl = candUrl;
+                }
+            }
+        }
+        var base = bestUrl || curSrc || '';
+        return promoteEmoteScaleUrl(base);
+    }
+
+    function restoreNativeEmoteImgOriginal(img) {
+        if (!img || !img.hasAttribute || !img.hasAttribute('data-tp9-orig-src')) return;
+        var origSrc = img.getAttribute('data-tp9-orig-src') || '';
+        var origSrcset = img.getAttribute('data-tp9-orig-srcset') || '';
+        if (origSrcset) {
+            if (img.getAttribute('srcset') !== origSrcset) {
+                img.setAttribute('srcset', origSrcset);
+            }
+        } else if (img.hasAttribute('srcset')) {
+            img.removeAttribute('srcset');
+        }
+        if (origSrc && img.getAttribute('src') !== origSrc) {
+            img.src = origSrc;
+        }
+        img.removeAttribute('data-tp9-orig-src');
+        img.removeAttribute('data-tp9-orig-srcset');
+    }
+
+    function restoreAllBigEmoteSources() {
+        if (typeof document === 'undefined' || !document.querySelectorAll) return;
+        var upgraded = document.querySelectorAll('img[data-tp9-orig-src]');
+        for (var i = 0; i < upgraded.length; i++) {
+            restoreNativeEmoteImgOriginal(upgraded[i]);
+        }
+    }
+
     function updateMessageOnlyEmotesState(msgEl) {
         if (!msgEl || msgEl.nodeType !== 1) return false;
         var emoteImgs = msgEl.querySelectorAll(
@@ -48687,42 +48773,68 @@ dashboardButton.style.visibility = 'hidden';
 
         // Si le mode Émotes géantes est actif et que le message est 100 % émotes,
         // bascule les images d'émotes Twitch et BTTV/7TV vers leur version haute définition (3x/4x)
-        var useBigHd = isOnlyEmotes && pageConfig.bigEmotes !== false;
+        // en forçant également srcset afin que React / DPR=1 ne retombe jamais sur la miniature 28x28 (1.0)
+        var useBigHd = !scriptIsOff() && isOnlyEmotes && !!pageConfig.bigEmotes;
         for (var j = 0; j < emoteImgs.length; j++) {
             var img = emoteImgs[j];
-            if (img.classList.contains('tp9-emote')) {
+            if (img.classList && img.classList.contains('tp9-emote')) {
                 var code = img.getAttribute('data-tp9-emote-code');
                 var em = code && bttvEmoteMap.get(code);
                 if (em) {
                     var targetSrc = resolveEmoteDisplayUrl(em, useBigHd);
+                    if (img.hasAttribute && img.hasAttribute('srcset')) {
+                        img.removeAttribute('srcset');
+                    }
                     if (targetSrc && img.getAttribute('src') !== targetSrc) {
                         img.src = targetSrc;
                     }
                 }
             } else {
                 var curSrc = img.getAttribute('src') || '';
+                var curSrcset = img.getAttribute('srcset') || '';
                 if (useBigHd) {
-                    if (!img.hasAttribute('data-tp9-orig-src')) {
+                    if ((curSrc || curSrcset) && !img.hasAttribute('data-tp9-orig-src')) {
                         img.setAttribute('data-tp9-orig-src', curSrc);
-                        img.setAttribute('data-tp9-orig-srcset', img.getAttribute('srcset') || '');
+                        img.setAttribute('data-tp9-orig-srcset', curSrcset);
                     }
-                    if (/\/1\.0(\?|$)/.test(curSrc)) {
-                        img.src = curSrc.replace(/\/1\.0(\?|$)/, '/3.0$1');
-                        img.removeAttribute('srcset');
-                    } else if (/1x\.(webp|gif|png|avif)(\?|$)/i.test(curSrc)) {
-                        img.src = curSrc.replace(/1x\.(webp|gif|png|avif)(\?|$)/i, '3x.$1$2');
-                        img.removeAttribute('srcset');
+                    var origSrcRef = img.getAttribute('data-tp9-orig-src') || '';
+                    var origSrcsetRef = img.getAttribute('data-tp9-orig-srcset') || '';
+                    var hdUrl = resolveNativeEmoteBigUrl(
+                        origSrcRef || curSrc,
+                        origSrcsetRef || curSrcset
+                    );
+                    if (hdUrl) {
+                        var hdSrcset = hdUrl + ' 1x, ' + hdUrl + ' 2x, ' + hdUrl + ' 4x';
+                        if (img.getAttribute('data-tp9-emote-big') !== hdUrl) {
+                            img.setAttribute('data-tp9-emote-big', hdUrl);
+                        }
+                        if (img.hasAttribute && img.hasAttribute('sizes')) {
+                            img.removeAttribute('sizes');
+                        }
+                        if (img.getAttribute('srcset') !== hdSrcset) {
+                            img.setAttribute('srcset', hdSrcset);
+                        }
+                        if (img.getAttribute('src') !== hdUrl) {
+                            img.src = hdUrl;
+                        }
+                        if (!img.__tp9BigFallbackBound && typeof img.addEventListener === 'function') {
+                            img.__tp9BigFallbackBound = true;
+                            img.addEventListener('error', function () {
+                                var selfImg = this;
+                                if (selfImg && selfImg.hasAttribute && selfImg.hasAttribute('data-tp9-orig-src')) {
+                                    var fbSrc = selfImg.getAttribute('data-tp9-orig-src') || '';
+                                    if (fbSrc && selfImg.getAttribute('src') !== fbSrc) {
+                                        restoreNativeEmoteImgOriginal(selfImg);
+                                    }
+                                }
+                            });
+                        }
                     }
-                } else if (img.hasAttribute('data-tp9-orig-src')) {
-                    var origSrc = img.getAttribute('data-tp9-orig-src');
-                    var origSrcset = img.getAttribute('data-tp9-orig-srcset');
-                    if (origSrc) img.src = origSrc;
-                    if (origSrcset) img.setAttribute('srcset', origSrcset);
-                    img.removeAttribute('data-tp9-orig-src');
-                    img.removeAttribute('data-tp9-orig-srcset');
+                } else if (img.hasAttribute && img.hasAttribute('data-tp9-orig-src')) {
+                    restoreNativeEmoteImgOriginal(img);
                 }
             }
-            if ((useBigHd || img.classList.contains('tp9-emote')) && !img.__tp9LiveLoadBound && typeof img.addEventListener === 'function') {
+            if ((useBigHd || (img.classList && img.classList.contains('tp9-emote'))) && !img.__tp9LiveLoadBound && typeof img.addEventListener === 'function') {
                 img.__tp9LiveLoadBound = true;
                 img.addEventListener('load', function () {
                     if (!msgEl.isConnected || scriptIsOff()) return;
@@ -48985,6 +49097,14 @@ dashboardButton.style.visibility = 'hidden';
         var lastEmoteImg = null;
         var lastEmoteWrap = null;
 
+        var parentIsBigMsg = Boolean(
+            !scriptIsOff() &&
+            pageConfig.bigEmotes &&
+            textNode.parentElement &&
+            textNode.parentElement.closest &&
+            textNode.parentElement.closest('.tp9-msg-only-emotes')
+        );
+
         for (var j = 0; j < parts.length; j++) {
             var tok = parts[j];
             var em = bttvEmoteMap.get(tok);
@@ -48993,7 +49113,7 @@ dashboardButton.style.visibility = 'hidden';
                 img.className = 'tp9-emote';
                 var u1 = resolveEmoteDisplayUrl(em, false);
                 var u3 = resolveEmoteDisplayUrl(em, true);
-                img.src = u1;
+                img.src = parentIsBigMsg ? (u3 || u1) : u1;
                 if (u1 !== em.url1x) {
                     img.onerror = (function (fallbackUrl) {
                         return function () {
@@ -50485,13 +50605,17 @@ dashboardButton.style.visibility = 'hidden';
         // 4b. Indexation dans l'historique des fils de réponses et @mentions (après rendu des émotes)
         finalizeChatMessageHistoryRecord(msgEl);
 
+        // 5. Émotes/Émojis géants HD si le message ne contient que des émotes ou émojis
+        // (exécuté avant la sauvegarde HTML des messages supprimés afin de conserver les URLs HD 3x/3.0)
+        updateMessageOnlyEmotesState(msgEl);
+
         // Sauvegarde du corps du message pour "Afficher les messages supprimés"
         var savedHtml = extractMessageOnlyHtml(msgEl);
         if (savedHtml) {
             msgEl.__tp9OrigBodyHtml = savedHtml;
         }
 
-        // 5. Anti-spam (regroupement des doublons consécutifs texte + émotes)
+        // 6. Anti-spam (regroupement des doublons consécutifs texte + émotes)
         var sig = buildMessageSignature(msgEl);
         if (pageConfig.antiSpam !== false && sig.length >= 2) {
             var now = Date.now();
@@ -50515,9 +50639,6 @@ dashboardButton.style.visibility = 'hidden';
                 bttvLastSpamAt = now;
             }
         }
-
-        // 6. Émotes/Émojis géants si le message ne contient que des émotes ou émojis
-        updateMessageOnlyEmotesState(msgEl);
 
         // 7. Lignes alternées (Split Chat) — calculé APRÈS tous les filtres de visibilité
         // (blacklist, masquage des bots, anti-spam, mode lent) pour garantir 1 ligne sur 2 stricte
@@ -51265,6 +51386,26 @@ dashboardButton.style.visibility = 'hidden';
             };
             for (var i = 0; i < records.length; i++) {
                 var rec = records[i];
+                if (rec.type === 'attributes') {
+                    if (pageConfig.bigEmotes && rec.target && rec.target.tagName === 'IMG' && rec.target.closest) {
+                        var attrMsg = rec.target.closest('.chat-line__message.tp9-msg-only-emotes, [data-a-target="chat-line-message"].tp9-msg-only-emotes');
+                        if (attrMsg && attrMsg.__tp9Processed) {
+                            var expectedBig = rec.target.getAttribute('data-tp9-emote-big') || '';
+                            var expectedSrcset = expectedBig ? (expectedBig + ' 1x, ' + expectedBig + ' 2x, ' + expectedBig + ' 4x') : '';
+                            var curAttrSrc = rec.target.getAttribute('src') || '';
+                            var curAttrSrcset = rec.target.getAttribute('srcset') || '';
+                            var isTp9Emote = Boolean(rec.target.classList && rec.target.classList.contains('tp9-emote'));
+                            if (
+                                !expectedBig ||
+                                curAttrSrc !== expectedBig ||
+                                (!isTp9Emote && curAttrSrcset !== expectedSrcset)
+                            ) {
+                                updateMessageOnlyEmotesState(attrMsg);
+                            }
+                        }
+                    }
+                    continue;
+                }
                 if ((rec.addedNodes && rec.addedNodes.length > 0) || (rec.removedNodes && rec.removedNodes.length > 0)) {
                     hadChildListChange = true;
                 }
@@ -51273,6 +51414,9 @@ dashboardButton.style.visibility = 'hidden';
                     : null;
                 if (targetMsg && targetMsg.__tp9Processed) {
                     checkAndRestoreDeletedMessage(targetMsg);
+                    if (pageConfig.bigEmotes || (targetMsg.classList && targetMsg.classList.contains('tp9-msg-only-emotes'))) {
+                        updateMessageOnlyEmotesState(targetMsg);
+                    }
                 }
                 for (var j = 0; j < rec.addedNodes.length; j++) {
                     var n = rec.addedNodes[j];
@@ -51303,7 +51447,12 @@ dashboardButton.style.visibility = 'hidden';
                 scheduleChatLiveEdgePin(scBefore);
             }
         });
-        bttvChatObserver.observe(container, { childList: true, subtree: true });
+        bttvChatObserver.observe(container, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['src', 'srcset']
+        });
 
         if (typeof ResizeObserver === 'function') {
             bttvChatResizeObserver = new ResizeObserver(function () {
@@ -54250,7 +54399,13 @@ dashboardButton.style.visibility = 'hidden';
                     }
                     var code = emoteImg.getAttribute('data-tp9-emote-code') || emoteImg.getAttribute('alt') || 'Emote';
                     var src = emoteImg.getAttribute('data-tp9-emote-src') || 'Twitch';
-                    var bigUrl = emoteImg.getAttribute('data-tp9-emote-big') || emoteImg.src;
+                    var bigUrl =
+                        emoteImg.getAttribute('data-tp9-emote-big') ||
+                        resolveNativeEmoteBigUrl(
+                            emoteImg.getAttribute('src') || emoteImg.src || '',
+                            emoteImg.getAttribute('srcset') || ''
+                        ) ||
+                        emoteImg.src;
                     if (src === 'Twitch' && bigUrl) {
                         bigUrl = bigUrl.replace('/1.0', '/3.0').replace('/2.0', '/3.0');
                     }
@@ -55458,6 +55613,9 @@ dashboardButton.style.visibility = 'hidden';
         '[data-a-target*="community-highlights-marquee" i], ' +
         '[data-test-selector*="community-highlights-marquee" i]';
 
+    var CHAT_PROMO_CAROUSEL_EXCLUSIVE_TEXT_RE =
+        /pour\s+devenir\s+1\s*er|devenez\s+1\s*er|to\s+(?:take|become)\s+#?1\b|faire\s+un\s+clip\s+des\s+meilleurs\s+moments|\bcréer\s+un\s+clip\b|clip\s+the\s+best\s+moments|\b(?:create|make)\s+a\s+clip\b|\btop\s+(?:gifters?|cheerers?)\b|meilleurs?\s+(?:donateurs?|gifters?|encouragements?)/i;
+
     var CHAT_EVENT_BANNER_SEL =
         '[data-test-selector="community-prediction-highlight-header"], ' +
         '[data-test-selector*="community-prediction" i], ' +
@@ -55469,7 +55627,63 @@ dashboardButton.style.visibility = 'hidden';
         '[class*="pinned-chat" i], ' +
         '[data-test-selector*="hype-train" i], ' +
         '[data-a-target*="hype-train" i], ' +
-        '[class*="hype-train" i]';
+        '[class*="hype-train" i], ' +
+        '[data-test-selector*="hype_train" i], ' +
+        '[data-a-target*="hype_train" i], ' +
+        '[data-test-selector*="celebration-banner" i], ' +
+        '[data-a-target*="celebration-banner" i], ' +
+        '[data-test-selector*="celebration" i][class*="banner" i]';
+
+    var CHAT_EVENT_BANNER_TEXT_RE =
+        /train de la hype|hype[\s-]*train|train au trésor|treasure train|golden kappa|kappa doré|\bhy{2,}p+e(?![a-z])|\bhype\s*!|\bsondage\b|\bpoll\b|\bprédiction\b|\bprediction\b|message épinglé|pinned by|épinglé par/i;
+
+    function getEffectiveBannerRect(el) {
+        if (!el || typeof el.getBoundingClientRect !== 'function') {
+            return { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
+        }
+        var r = el.getBoundingClientRect();
+        if (r && r.height >= 18) return r;
+        var kids = el.children;
+        if (!kids || !kids.length) return r;
+        var minTop = Infinity;
+        var maxBottom = -Infinity;
+        var minLeft = Infinity;
+        var maxRight = -Infinity;
+        var found = false;
+        for (var i = 0; i < kids.length; i++) {
+            var k = kids[i];
+            if (!k || k.nodeType !== 1) continue;
+            var kr = k.getBoundingClientRect ? k.getBoundingClientRect() : null;
+            if ((!kr || kr.height <= 0 || kr.width <= 0) && k.children && k.children.length) {
+                for (var j = 0; j < k.children.length; j++) {
+                    var gc = k.children[j];
+                    var gcr = gc && gc.getBoundingClientRect ? gc.getBoundingClientRect() : null;
+                    if (gcr && gcr.height > 0 && gcr.width > 0) {
+                        if (gcr.top < minTop) minTop = gcr.top;
+                        if (gcr.bottom > maxBottom) maxBottom = gcr.bottom;
+                        if (gcr.left < minLeft) minLeft = gcr.left;
+                        if (gcr.right > maxRight) maxRight = gcr.right;
+                        found = true;
+                    }
+                }
+            } else if (kr && kr.height > 0 && kr.width > 0) {
+                if (kr.top < minTop) minTop = kr.top;
+                if (kr.bottom > maxBottom) maxBottom = kr.bottom;
+                if (kr.left < minLeft) minLeft = kr.left;
+                if (kr.right > maxRight) maxRight = kr.right;
+                found = true;
+            }
+        }
+        if (!found) return r;
+        return {
+            left: minLeft,
+            top: minTop,
+            right: maxRight,
+            bottom: maxBottom,
+            width: Math.max(0, maxRight - minLeft),
+            height: Math.max(0, maxBottom - minTop)
+        };
+    }
 
     function resolveChatTopContext() {
         var chatCol = document.querySelector(
@@ -55506,7 +55720,7 @@ dashboardButton.style.visibility = 'hidden';
         var inputAreaEl = chatCol.querySelector('.chat-input') || (inputEl && inputEl.closest('.chat-input')) || inputEl;
 
         var colRect = chatCol.getBoundingClientRect();
-        var chatTopLimit = (headerEl ? headerEl.getBoundingClientRect().bottom : colRect.top) + 230;
+        var chatTopLimit = (headerEl ? headerEl.getBoundingClientRect().bottom : colRect.top) + 260;
 
         return {
             chatCol: chatCol,
@@ -55535,12 +55749,12 @@ dashboardButton.style.visibility = 'hidden';
         if (el.matches && el.matches(CHAT_EVENT_BANNER_SEL)) return true;
         if (el.querySelector && el.querySelector(CHAT_EVENT_BANNER_SEL)) return true;
         var rawTxt = (el.textContent || '').trim();
-        if (!rawTxt || rawTxt.length > 800) return false;
+        if (!rawTxt || rawTxt.length > 900) return false;
         var cleanedTxt = rawTxt.replace(
             /faire\s+un\s+clip\s+des\s+meilleurs\s+moments\s+de\s+\S+|clip\s+the\s+best\s+moments\s+from\s+\S+/gi,
             ''
         );
-        return /train de la hype|hype train|\bsondage\b|\bpoll\b|\bprédiction\b|\bprediction\b|message épinglé|pinned by|épinglé par/i.test(cleanedTxt);
+        return CHAT_EVENT_BANNER_TEXT_RE.test(cleanedTxt);
     }
 
     function containsPromoCarouselBanner(el) {
@@ -55549,6 +55763,35 @@ dashboardButton.style.visibility = 'hidden';
         if (el.querySelector && el.querySelector(CHAT_PROMO_CAROUSEL_SEL)) return true;
         var rawTxt = (el.textContent || '').trim();
         return rawTxt.length >= 6 && rawTxt.length <= 800 && CHAT_PROMO_CAROUSEL_TEXT_RE.test(rawTxt);
+    }
+
+    // Détecte si un conteneur regroupe À LA FOIS un événement (Hype Train / Sondage) ET une vraie carte carrousel promo distincte,
+    // sans confondre le texte d'appel aux dons interne d'un Hype Train (« Offrez 1 abonnement / Envoyez des Bits ») avec le carrousel promo
+    function containsSeparatePromoCarousel(el) {
+        if (!el || el.nodeType !== 1) return false;
+        if (!isCommunityEventBanner(el)) {
+            return containsPromoCarouselBanner(el);
+        }
+        if (el.matches && (el.matches(CHAT_EVENT_BANNER_SEL) || el.matches('.community-highlight-stack__card--wide, [class*="community-highlight-stack__card" i]'))) {
+            return false;
+        }
+        if (el.querySelector && el.querySelector(CHAT_PROMO_CAROUSEL_SEL)) {
+            return true;
+        }
+        if (!el.querySelectorAll) return false;
+        var subNodes = el.querySelectorAll('div, section, aside');
+        for (var i = 0; i < subNodes.length; i++) {
+            var d = subNodes[i];
+            if (!d || isCommunityEventBanner(d)) continue;
+            if (d.closest && d.closest(CHAT_EVENT_BANNER_SEL)) continue;
+            var dRect = getEffectiveBannerRect(d);
+            if (hasCarouselSideArrows(d, dRect)) return true;
+            var dTxt = (d.textContent || '').trim();
+            if (dTxt.length >= 6 && dTxt.length <= 500 && CHAT_PROMO_CAROUSEL_EXCLUSIVE_TEXT_RE.test(dTxt)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     function hasCarouselSideArrows(el, elRect) {
@@ -55619,7 +55862,7 @@ dashboardButton.style.visibility = 'hidden';
             if (isRaidOrDropBanner(el)) continue;
             if (preserveEvents && isCommunityEventBanner(el)) continue;
 
-            var cr = el.getBoundingClientRect();
+            var cr = getEffectiveBannerRect(el);
             if (cr.height < 18 || cr.height > 230 || cr.top > chatTopLimit) continue;
 
             var precedesMsgList = Boolean(
@@ -55644,7 +55887,7 @@ dashboardButton.style.visibility = 'hidden';
                 !isRaidOrDropBanner(targetBanner.parentElement) &&
                 !(preserveEvents && isCommunityEventBanner(targetBanner.parentElement))
             ) {
-                var pr = targetBanner.parentElement.getBoundingClientRect();
+                var pr = getEffectiveBannerRect(targetBanner.parentElement);
                 if (pr.height > 0 && pr.height <= 240 && pr.top <= chatTopLimit) {
                     targetBanner = targetBanner.parentElement;
                 } else {
@@ -55655,7 +55898,7 @@ dashboardButton.style.visibility = 'hidden';
         }
     }
 
-    // Option « Fermer bannières (Hype Train, Sondages) » : masque uniquement Hype Train, Sondages, Prédictions et Messages épinglés
+    // Option « Fermer bannières (Hype Train, Sondages) » : masque intégralement Hype Train (y compris l'animation « Hyyyyype »), Sondages, Prédictions et Messages épinglés
     function sweepChatTopBanners() {
         if (scriptIsOff() || !pageConfig.closeBanners) {
             var hidden = document.querySelectorAll('.tp9-chat-banner-hidden');
@@ -55682,7 +55925,7 @@ dashboardButton.style.visibility = 'hidden';
                 containsProtectedChatTarget(hNode, headerEl, msgListEl, inputAreaEl) ||
                 isRaidOrDropBanner(hNode) ||
                 !isCommunityEventBanner(hNode) ||
-                (preservePromoCarousel && containsPromoCarouselBanner(hNode))
+                (preservePromoCarousel && containsSeparatePromoCarousel(hNode))
             ) {
                 hNode.classList.remove('tp9-chat-banner-hidden');
             }
@@ -55695,10 +55938,18 @@ dashboardButton.style.visibility = 'hidden';
             if (isProtectedChatBannerNode(el, headerEl, msgListEl, inputAreaEl)) continue;
             if (containsProtectedChatTarget(el, headerEl, msgListEl, inputAreaEl)) continue;
             if (isRaidOrDropBanner(el)) continue;
-            if (preservePromoCarousel && containsPromoCarouselBanner(el)) continue;
+            if (preservePromoCarousel && containsSeparatePromoCarousel(el)) continue;
 
-            var cr = el.getBoundingClientRect();
-            if (cr.height < 18 || cr.height > 250 || cr.top > chatTopLimit) continue;
+            var explicitEventNode = Boolean(
+                (el.matches && el.matches(CHAT_EVENT_BANNER_SEL)) ||
+                (el.querySelector && el.querySelector(CHAT_EVENT_BANNER_SEL))
+            );
+            var cr = getEffectiveBannerRect(el);
+            if (!explicitEventNode) {
+                if (cr.height < 18 || cr.height > 380 || cr.top > chatTopLimit) continue;
+            } else {
+                if (cr.height > 380 || (cr.height > 0 && cr.top > chatTopLimit + 80)) continue;
+            }
 
             if (!isCommunityEventBanner(el)) continue;
 
@@ -55709,10 +55960,10 @@ dashboardButton.style.visibility = 'hidden';
                 !containsProtectedChatTarget(targetBanner.parentElement, headerEl, msgListEl, inputAreaEl) &&
                 !isProtectedChatBannerNode(targetBanner.parentElement, headerEl, msgListEl, inputAreaEl) &&
                 !isRaidOrDropBanner(targetBanner.parentElement) &&
-                !(preservePromoCarousel && containsPromoCarouselBanner(targetBanner.parentElement))
+                !(preservePromoCarousel && containsSeparatePromoCarousel(targetBanner.parentElement))
             ) {
-                var pr = targetBanner.parentElement.getBoundingClientRect();
-                if (pr.height > 0 && pr.height <= 250 && pr.top <= chatTopLimit) {
+                var pr = getEffectiveBannerRect(targetBanner.parentElement);
+                if (pr.height >= 0 && pr.height <= 380 && (pr.height === 0 || pr.top <= chatTopLimit + 80)) {
                     targetBanner = targetBanner.parentElement;
                 } else {
                     break;
@@ -55722,6 +55973,59 @@ dashboardButton.style.visibility = 'hidden';
         }
     }
 
+    function disconnectChatBannerObserver() {
+        if (bttvBannerSweepTimer) {
+            clearTimeout(bttvBannerSweepTimer);
+            bttvBannerSweepTimer = null;
+        }
+        if (bttvChatBannerObserver) {
+            try { bttvChatBannerObserver.disconnect(); } catch (e) {}
+            bttvChatBannerObserver = null;
+        }
+        bttvObservedBannerRoot = null;
+    }
+
+    function ensureChatBannerObserver() {
+        if (typeof MutationObserver !== 'function' || typeof document === 'undefined' || !document.querySelector) return;
+        if (scriptIsOff() || (!pageConfig.closeBanners && !pageConfig.hideChatCarousel)) {
+            disconnectChatBannerObserver();
+            return;
+        }
+        var chatCol = document.querySelector(
+            '.stream-chat, [data-a-target="stream-chat"], .chat-room, [data-test-selector="chat-room-component-layout"]'
+        );
+        if (!chatCol) {
+            disconnectChatBannerObserver();
+            return;
+        }
+        if (bttvChatBannerObserver && bttvObservedBannerRoot === chatCol) return;
+        disconnectChatBannerObserver();
+        bttvObservedBannerRoot = chatCol;
+        bttvChatBannerObserver = new MutationObserver(function (records) {
+            if (scriptIsOff() || (!pageConfig.closeBanners && !pageConfig.hideChatCarousel)) return;
+            var relevant = false;
+            for (var i = 0; i < records.length; i++) {
+                var t = records[i].target;
+                if (!t || t.nodeType !== 1) continue;
+                if (t.closest && t.closest('.chat-scrollable-area__message-container, [data-test-selector="chat-scrollable-area__message-container"], .chat-input, [data-a-target="chat-input"]')) {
+                    continue;
+                }
+                relevant = true;
+                break;
+            }
+            if (!relevant || bttvBannerSweepTimer) return;
+            bttvBannerSweepTimer = setTimeout(function () {
+                bttvBannerSweepTimer = null;
+                if (scriptIsOff()) return;
+                sweepChatPromoCarousel();
+                sweepChatTopBanners();
+            }, 16);
+        });
+        try {
+            bttvChatBannerObserver.observe(chatCol, { childList: true, subtree: true });
+        } catch (e) {}
+    }
+
     // Boucle 1 seconde pour Coffres de points, Drops, Anti-Raid, Auto-Theater, Autoplay accueil, Barre latérale
     function bttvOneSecondTick() {
         if (scriptIsOff()) return;
@@ -55729,6 +56033,7 @@ dashboardButton.style.visibility = 'hidden';
         ensureSdaObserver();
         sweepStreamDisplayAds();
         ensureChatObserver();
+        ensureChatBannerObserver();
         ensureChatEmoteButton();
         ensurePlayerToolButtons();
         updateChatInputEmoteMirror();
@@ -55837,7 +56142,7 @@ dashboardButton.style.visibility = 'hidden';
                 var code = img.getAttribute('data-tp9-emote-code');
                 var em = code && bttvEmoteMap.get(code);
                 if (em) {
-                    var isBig = pageConfig.bigEmotes !== false && !!img.closest('.tp9-msg-only-emotes');
+                    var isBig = !!pageConfig.bigEmotes && !!img.closest('.tp9-msg-only-emotes');
                     img.src = resolveEmoteDisplayUrl(em, isBig);
                     img.setAttribute('data-tp9-emote-big', resolveEmoteDisplayUrl(em, true));
                 }
@@ -55846,6 +56151,9 @@ dashboardButton.style.visibility = 'hidden';
         } else {
             reapplySplitChatOnExisting();
         }
+        sweepChatPromoCarousel();
+        sweepChatTopBanners();
+        ensureChatBannerObserver();
     }
 
     var bttvSidebarExpandTimer = null;
