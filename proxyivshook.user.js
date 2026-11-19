@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch HLS Proxy
 // @namespace    twitch-proxy-ivs
-// @version      1.12.5
+// @version      1.12.6
 // @author       razeNFR
 // @description  Twitch Guard : bloque les pubs Twitch (via proxys ou en mode Adblock sans proxy), retour arrière dans le direct et dashboard de statistiques
 // @match        https://www.twitch.tv/*
@@ -14,6 +14,10 @@
 // ==/UserScript==
 
 // ==Changelog==
+// 1.12.6
+// - Nouvelle option « Masquer des catégories & leurs streams » (Auto & Épur.) avec recherche auto-complétée : cache les catégories choisies ainsi que tous les streamers qui les diffusent sur tout Twitch (barre latérale, accueil, parcourir, recherche) || New "Hide categories & their streams" option (Auto & Clean UI) with autocomplete search: hides selected categories and all streamers broadcasting them across Twitch (sidebar, home, browse, search)
+// - Nouveau mode « Garder si molette » sur la « Pause du défilement au focus » (Tchat & Filtres) : maintient le tchat en pause même lorsque le curseur sort du tchat après avoir remonté la discussion à la molette || New "Keep on wheel" mode on "Pause scroll on focus" (Chat & Filters): keeps chat paused even after the cursor leaves the chat window once scrolled up with the mouse wheel
+// - Nouvelles options de barre latérale & d'accueil (Auto & Épur.) : ajout de « Cacher la section « Pour vous » » (Stories), « Cacher « Jouer sur Luna » » à gauche, et « Toujours « Afficher plus » sur l'accueil » pour déplier automatiquement les chaînes live recommandées || New sidebar & homepage options (Auto & Clean UI): added "Hide 'For You' section" (Stories), "Hide 'Play on Luna'" on the left, and "Always 'Show more' on homepage" to automatically expand recommended live channels
 // 1.12.5
 // - Correctif de la double barre de progression pour les abonnés à la chaîne et les membres Turbo : masque automatiquement le retour arrière natif de Twitch (barre + temps écoulé) quand celui du script est actif, pour ne garder qu'une seule barre || Fixed the double progress bar for channel subscribers and Turbo members: automatically hides Twitch's native rewind (bar + elapsed time) when the script's rewind is active, so only one bar remains
 // 1.12.4
@@ -109,7 +113,7 @@
         Math.random().toString(36).substring(2, 9);
 
     // Doit être tenu à jour avec le @version de l'en-tête du script.
-    var CURRENT_VERSION = '1.12.5';
+    var CURRENT_VERSION = '1.12.6';
 
     // Même URL que @updateURL : contient toujours la dernière version
     // publiée. On la relit nous-même (plutôt que de compter sur le
@@ -699,6 +703,10 @@
         'Fige le défilement quand ta souris survole les messages.': 'Freezes chat scrolling when your mouse hovers over messages.',
         'Pause du défilement au survol': 'Pause scrolling on hover',
         'Empêche le tchat de sauter pendant que tu lis': 'Prevents chat from jumping while you read',
+        'Fige le défilement au survol. « Garder si molette » ne redescend pas le tchat quand ta souris sort si tu as remonté à la molette.': 'Freezes chat on hover. "Keep if scrolled" keeps chat paused on mouse leave when you manually scrolled up.',
+        'Comportement à la sortie du tchat': 'Behavior when leaving chat',
+        'Reprendre en sortant': 'Resume on leave',
+        'Garder si molette': 'Keep if scrolled',
         'Historique flèche Haut ↑': 'Up Arrow ↑ input history',
         'Rappelle tes derniers messages envoyés avec les flèches ↑ et ↓.': 'Recalls your last sent messages using the ↑ and ↓ arrow keys.',
         'Historique de saisie (Flèche ↑)': 'Input history (Up Arrow ↑)',
@@ -773,14 +781,31 @@
         'Clique automatiquement sur « Afficher plus » dans la barre latérale gauche.': 'Automatically clicks "Show More" in the left sidebar.',
         'Déplier toute la liste des chaînes suivies': 'Expand full followed channels list',
         'Ouvre automatiquement « Afficher plus » à gauche': 'Automatically expands "Show More" on the left',
+        'Déplier les chaînes live de l\'accueil': 'Expand homepage live channels',
+        'Clique automatiquement sur « Afficher plus » sous « Chaînes live qui pourraient vous plaire » sur la page d\'accueil.': 'Automatically clicks "Show more" under "Live channels we think you’ll like" on the homepage.',
+        'Toujours « Afficher plus » sur l\'accueil': 'Always "Show more" on homepage',
+        'Déplie automatiquement « Chaînes live qui pourraient vous plaire »': 'Automatically expands "Live channels we think you’ll like"',
         'Cacher les chaînes hors ligne': 'Hide offline channels',
         'Masque les chaînes « Déconnecté(e) » dans la liste des chaînes suivies à gauche.': 'Hides "Offline" channels in the followed channels list on the left.',
         'Cacher les chaînes suivies hors ligne': 'Hide offline followed channels',
         'N\'affiche que les chaînes actuellement en direct à gauche': 'Only shows channels currently live on the left',
+        'Cacher « Pour vous » (barre latérale)': 'Hide "For You" (sidebar)',
+        'Masque l\'en-tête « Pour vous », « Ouvrir les stories » et « Protégez votre série » au-dessus de tes chaînes suivies.': 'Hides the "For You" header, "Open stories", and "Protect your streak" above your followed channels.',
+        'Cacher la section « Pour vous »': 'Hide "For You" section',
+        'Masque Stories et Série de visionnage en haut à gauche': 'Hides Stories and Watch Streak at the top-left',
+        'Cacher « Jouer sur Luna » (barre latérale)': 'Hide "Play on Luna" (sidebar)',
+        'Masque la section Amazon Luna et ses jeux cloud dans la barre latérale gauche.': 'Hides the Amazon Luna section and its cloud games in the left sidebar.',
+        'Cacher « Jouer sur Luna »': 'Hide "Play on Luna"',
+        'Masque la section de jeux Amazon Luna à gauche': 'Hides the Amazon Luna games section on the left',
         'Cacher chaînes recommandées': 'Hide recommended channels',
         'Masque les sections Recommandé et les extensions vidéo.': 'Hides Recommended sections and video extensions.',
         'Cacher chaînes recommandées & extensions': 'Hide recommended channels & extensions',
         'Ne garde que tes chaînes suivies à gauche': 'Keeps only your followed channels on the left',
+        'Masquer des catégories Twitch': 'Hide Twitch categories',
+        'Cache les catégories choisies ainsi que tous les streamers qui les diffusent (barre latérale, accueil, parcourir, recherche).': 'Hides selected categories and all streamers broadcasting them (sidebar, home, browse, search).',
+        'Masquer des catégories & leurs streams': 'Hide categories & their streams',
+        'Cache la catégorie et tous les lives dessus partout sur Twitch': 'Hides the category and all live streams in it across Twitch',
+        'Ajouter une catégorie (ex: Grand Theft Auto VI)…': 'Add a category (e.g. Grand Theft Auto VI)…',
         'Cacher l\'offre Twitch Turbo': 'Hide Twitch Turbo offer',
         'Cacher Bits et boutons d\'abonnement': 'Hide Bits and subscribe buttons',
         'Cacher le bandeau promo sous le lecteur': 'Hide promo banner under player',
@@ -968,8 +993,12 @@
         closeBanners: '<rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><polyline points="9 15 12 12 15 15"/>',
         sidebarPreview: '<rect x="2" y="4" width="20" height="16" rx="2"/><line x1="8" y1="4" x2="8" y2="20"/><polygon points="13 9 18 12 13 15 13 9"/>',
         expandSidebar: '<polyline points="7 13 12 18 17 13"/><polyline points="7 6 12 11 17 6"/>',
+        expandHomeLive: '<rect x="3" y="3" width="8" height="6" rx="1.2"/><rect x="13" y="3" width="8" height="6" rx="1.2"/><polyline points="7 14 12 19 17 14"/>',
         hideOffline: '<path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="18" y1="8" x2="23" y2="13"/><line x1="23" y1="8" x2="18" y2="13"/>',
+        hideForYou: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.5"/><line x1="2" y1="2" x2="22" y2="22"/>',
+        hideLuna: '<polygon points="12 4 4.5 18 19.5 18"/><line x1="2" y1="2" x2="22" y2="22"/>',
         hideRecom: '<circle cx="12" cy="12" r="9"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/><line x1="2" y1="2" x2="22" y2="22"/>',
+        hideCategory: '<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="8" rx="1.5"/><rect x="3" y="15" width="7" height="6" rx="1.5"/><circle cx="17.5" cy="17.5" r="3.5"/><line x1="15" y1="15" x2="20" y2="20"/>',
         hideTurbo: '<polyline points="12.41 6.75 13 2 10.57 4.92"/><polyline points="18.57 12.91 21 10 15.66 10"/><polyline points="8 8 3 14 12 14 11 22 16 16"/><line x1="1" y1="1" x2="23" y2="23"/>',
         hideSubs: '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/><line x1="2" y1="2" x2="22" y2="22"/>',
         hidePromo: '<rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="2" y1="2" x2="22" y2="22"/>',
@@ -1366,6 +1395,7 @@
             slowChat: false,
             slowChatRate: 2,
             hoverPause: true,
+            hoverPauseMode: 'always',
             upArrowHistory: true,
             dblClickReply: false,
             replyThreadNav: true,
@@ -1379,8 +1409,12 @@
             closeBanners: false,
             sidebarPreview: true,
             autoExpandSidebar: false,
+            autoExpandHomeLive: false,
             hideOfflineChannels: false,
+            hideForYou: false,
+            hideLuna: false,
             hideRecom: false,
+            hideCategories: true,
             channelVolumes: {},
             lastGlobalVolume: null,
             splitChatColor: '#9147ff',
@@ -1388,7 +1422,9 @@
             frequentEmotes: [],
             favoriteEmotes: [],
             highlightWords: [],
-            blacklistWords: []
+            blacklistWords: [],
+            blockedCategories: [],
+            blockedCategoryMeta: {}
         };
 
         if (!parsed || typeof parsed !== 'object') {
@@ -1552,8 +1588,8 @@
             'hideChatNotices', 'showDeleted', 'uncensorChat', 'readableColors', 'antiSpam',
             'slowChat', 'hoverPause', 'upArrowHistory', 'dblClickReply', 'replyThreadNav', 'hideBadges',
             'highlightMentions', 'highlightKeywords', 'blacklistKeywords', 'autoPoints', 'autoDrops',
-            'antiRaid', 'closeBanners', 'sidebarPreview', 'autoExpandSidebar',
-            'hideOfflineChannels', 'hideRecom'
+            'antiRaid', 'closeBanners', 'sidebarPreview', 'autoExpandSidebar', 'autoExpandHomeLive',
+            'hideOfflineChannels', 'hideForYou', 'hideLuna', 'hideRecom', 'hideCategories'
         ].forEach(
             function (key) {
                 if (typeof parsed[key] === 'boolean') {
@@ -1582,13 +1618,35 @@
             }
         }
 
-        ['frequentEmotes', 'favoriteEmotes', 'highlightWords', 'blacklistWords'].forEach(function (arrKey) {
+        if (parsed.hoverPauseMode === 'always' || parsed.hoverPauseMode === 'keep') {
+            config.hoverPauseMode = parsed.hoverPauseMode;
+        }
+
+        ['frequentEmotes', 'favoriteEmotes', 'highlightWords', 'blacklistWords', 'blockedCategories'].forEach(function (arrKey) {
             if (Array.isArray(parsed[arrKey])) {
                 config[arrKey] = parsed[arrKey].filter(function (x) {
                     return typeof x === 'string' && x.trim().length > 0;
                 }).slice(0, 200);
             }
         });
+
+        if (parsed.blockedCategoryMeta && typeof parsed.blockedCategoryMeta === 'object') {
+            var metaKeys = Object.keys(parsed.blockedCategoryMeta).slice(0, 200);
+            metaKeys.forEach(function (mk) {
+                var entry = parsed.blockedCategoryMeta[mk];
+                if (!entry || typeof entry !== 'object') return;
+                var cleanSlug = typeof entry.slug === 'string' ? entry.slug.trim().toLowerCase() : '';
+                var cleanName = typeof entry.name === 'string' ? entry.name.trim() : '';
+                var cleanDisp = typeof entry.displayName === 'string' ? entry.displayName.trim() : '';
+                if (cleanSlug || cleanName || cleanDisp) {
+                    config.blockedCategoryMeta[mk] = {
+                        slug: cleanSlug,
+                        name: cleanName,
+                        displayName: cleanDisp
+                    };
+                }
+            });
+        }
 
         ['splitChatColor', 'highlightColor'].forEach(function (colKey) {
             if (typeof parsed[colKey] === 'string' && /^#[0-9a-fA-F]{6}$/.test(parsed[colKey])) {
@@ -1923,6 +1981,7 @@
                 slowChat: !!pageConfig.slowChat,
                 slowChatRate: pageConfig.slowChatRate || 2,
                 hoverPause: pageConfig.hoverPause !== false,
+                hoverPauseMode: pageConfig.hoverPauseMode === 'keep' ? 'keep' : 'always',
                 upArrowHistory: pageConfig.upArrowHistory !== false,
                 dblClickReply: !!pageConfig.dblClickReply,
                 replyThreadNav: pageConfig.replyThreadNav !== false,
@@ -1936,8 +1995,12 @@
                 closeBanners: !!pageConfig.closeBanners,
                 sidebarPreview: pageConfig.sidebarPreview !== false,
                 autoExpandSidebar: !!pageConfig.autoExpandSidebar,
+                autoExpandHomeLive: !!pageConfig.autoExpandHomeLive,
                 hideOfflineChannels: !!pageConfig.hideOfflineChannels,
+                hideForYou: !!pageConfig.hideForYou,
+                hideLuna: !!pageConfig.hideLuna,
                 hideRecom: !!pageConfig.hideRecom,
+                hideCategories: pageConfig.hideCategories !== false,
                 channelVolumes: pageConfig.channelVolumes || {},
                 lastGlobalVolume: pageConfig.lastGlobalVolume,
                 splitChatColor: pageConfig.splitChatColor || '#9147ff',
@@ -1945,7 +2008,9 @@
                 frequentEmotes: pageConfig.frequentEmotes || [],
                 favoriteEmotes: pageConfig.favoriteEmotes || [],
                 highlightWords: pageConfig.highlightWords || [],
-                blacklistWords: pageConfig.blacklistWords || []
+                blacklistWords: pageConfig.blacklistWords || [],
+                blockedCategories: pageConfig.blockedCategories || [],
+                blockedCategoryMeta: pageConfig.blockedCategoryMeta || {}
             };
 
             var json =
@@ -5166,6 +5231,30 @@
     }
 
     function findPlaybackVideo() {
+        var onChannelOrVod = Boolean(
+            (typeof getTestChannel === 'function' && getTestChannel()) ||
+            (typeof getCurrentVodRouteId === 'function' && getCurrentVodRouteId())
+        );
+        // Hors page de chaîne ou de VOD (ex: Accueil, Parcourir), le lecteur
+        // flottant réduit (mini-player) a la priorité absolue sur le carrousel
+        // d'accueil pour que le suivi et le bloqueur continuent dessus.
+        if (!onChannelOrVod) {
+            var miniCandidates = document.querySelectorAll(
+                '.persistent-player--mini video, .persistent-player video, [data-a-player-state="mini"] video, video'
+            );
+            for (var mi = 0; mi < miniCandidates.length; mi++) {
+                var mVid = miniCandidates[mi];
+                if (!mVid || isOwnPlayerVideo(mVid) || isPreviewOrAuxiliaryVideo(mVid) || isAdVideoElement(mVid)) {
+                    continue;
+                }
+                if (
+                    isMiniPlayerVideo(mVid) ||
+                    (mVid.closest && mVid.closest('.persistent-player--mini, [data-a-player-state="mini"]'))
+                ) {
+                    return mVid;
+                }
+            }
+        }
         var mainVideos = document.querySelectorAll(
             '.persistent-player .video-player video, [data-a-target="video-player"] video, .video-player video'
         );
@@ -7114,17 +7203,21 @@
 
     function renderKeywordTags(type) {
         if (!dashboard) return;
+        var isCat = type === 'cat';
         var isHl = type === 'hl';
-        var listKey = isHl ? 'highlightWords' : 'blacklistWords';
-        var container = dashboard.querySelector(isHl ? '.tp9-hl-tags' : '.tp9-bl-tags');
+        var listKey = isCat ? 'blockedCategories' : (isHl ? 'highlightWords' : 'blacklistWords');
+        var container = dashboard.querySelector(isCat ? '.tp9-cat-tags' : (isHl ? '.tp9-hl-tags' : '.tp9-bl-tags'));
         if (!container) return;
         var words = Array.isArray(pageConfig[listKey]) ? pageConfig[listKey] : [];
         if (!words.length) {
-            container.innerHTML = '<span class="tp9-tag-empty">' + tt('Aucun mot configuré', 'No words configured') + '</span>';
+            container.innerHTML = '<span class="tp9-tag-empty">' +
+                (isCat ? tt('Aucune catégorie masquée', 'No hidden categories') : tt('Aucun mot configuré', 'No words configured')) +
+            '</span>';
             return;
         }
+        var tagCls = isCat ? 'tp9-kw-cat' : (isHl ? 'tp9-kw-hl' : 'tp9-kw-bl');
         container.innerHTML = words.map(function (w, idx) {
-            return '<span class="tp9-kw-tag ' + (isHl ? 'tp9-kw-hl' : 'tp9-kw-bl') + '">' +
+            return '<span class="tp9-kw-tag ' + tagCls + '" data-tp9-raw="1">' +
                 escapeHTML(String(w)) +
                 '<button type="button" class="tp9-kw-del" data-idx="' + idx + '" aria-label="' + tt('Supprimer', 'Delete') + '">×</button>' +
             '</span>';
@@ -7134,10 +7227,17 @@
                 e.stopPropagation();
                 var idx = parseInt(btn.getAttribute('data-idx'), 10);
                 if (Array.isArray(pageConfig[listKey]) && idx >= 0 && idx < pageConfig[listKey].length) {
-                    pageConfig[listKey].splice(idx, 1);
+                    var removed = pageConfig[listKey].splice(idx, 1)[0];
+                    if (isCat && removed && pageConfig.blockedCategoryMeta && typeof normalizeCategoryKey === 'function') {
+                        var normK = normalizeCategoryKey(removed);
+                        if (normK && pageConfig.blockedCategoryMeta[normK]) {
+                            delete pageConfig.blockedCategoryMeta[normK];
+                        }
+                    }
                     saveConfig(pageConfig);
                     broadcastConfig();
                     renderKeywordTags(type);
+                    if (typeof syncBttvFeatures === 'function') syncBttvFeatures();
                 }
             });
         });
@@ -7855,19 +7955,25 @@
                                         </label>
                                     </span>
                                 </div>
-                                <label class="tp9-toggle-row"
+                                <div class="tp9-toggle-row"
                                     data-tp9-tip="Pause du tchat au survol"
-                                    data-tp9-tip-sub="Fige le défilement quand ta souris survole les messages.">
+                                    data-tp9-tip-sub="Fige le défilement au survol. « Garder si molette » ne redescend pas le tchat quand ta souris sort si tu as remonté à la molette.">
                                     <span class="tp9-toggle-label">
                                         ${tp9OptIcon(TP9_ICON_PATHS.hoverPause)}
                                         <span>Pause du défilement au survol</span>
                                         <span class="tp9-toggle-sub">Empêche le tchat de sauter pendant que tu lis</span>
                                     </span>
-                                    <span class="tp9-switch">
-                                        <input type="checkbox" class="tp9-hover-pause">
-                                        <span class="tp9-switch-track"></span>
+                                    <span class="tp9-row-controls">
+                                        <select class="tp9-inline-select tp9-hover-pause-mode" data-tp9-tip="Comportement à la sortie du tchat" aria-label="Comportement à la sortie du tchat">
+                                            <option value="always">Reprendre en sortant</option>
+                                            <option value="keep">Garder si molette</option>
+                                        </select>
+                                        <label class="tp9-switch">
+                                            <input type="checkbox" class="tp9-hover-pause">
+                                            <span class="tp9-switch-track"></span>
+                                        </label>
                                     </span>
-                                </label>
+                                </div>
                                 <label class="tp9-toggle-row"
                                     data-tp9-tip="Historique flèche Haut ↑"
                                     data-tp9-tip-sub="Rappelle tes derniers messages envoyés avec les flèches ↑ et ↓.">
@@ -8129,6 +8235,19 @@
                                     </span>
                                 </label>
                                 <label class="tp9-toggle-row"
+                                    data-tp9-tip="Déplier les chaînes live de l'accueil"
+                                    data-tp9-tip-sub="Clique automatiquement sur « Afficher plus » sous « Chaînes live qui pourraient vous plaire » sur la page d'accueil.">
+                                    <span class="tp9-toggle-label">
+                                        ${tp9OptIcon(TP9_ICON_PATHS.expandHomeLive)}
+                                        <span>Toujours « Afficher plus » sur l'accueil</span>
+                                        <span class="tp9-toggle-sub">Déplie automatiquement « Chaînes live qui pourraient vous plaire »</span>
+                                    </span>
+                                    <span class="tp9-switch">
+                                        <input type="checkbox" class="tp9-expand-home-live">
+                                        <span class="tp9-switch-track"></span>
+                                    </span>
+                                </label>
+                                <label class="tp9-toggle-row"
                                     data-tp9-tip="Cacher les chaînes hors ligne"
                                     data-tp9-tip-sub="Masque les chaînes « Déconnecté(e) » dans la liste des chaînes suivies à gauche.">
                                     <span class="tp9-toggle-label">
@@ -8138,6 +8257,32 @@
                                     </span>
                                     <span class="tp9-switch">
                                         <input type="checkbox" class="tp9-hide-offline">
+                                        <span class="tp9-switch-track"></span>
+                                    </span>
+                                </label>
+                                <label class="tp9-toggle-row"
+                                    data-tp9-tip="Cacher « Pour vous » (barre latérale)"
+                                    data-tp9-tip-sub="Masque l'en-tête « Pour vous », « Ouvrir les stories » et « Protégez votre série » au-dessus de tes chaînes suivies.">
+                                    <span class="tp9-toggle-label">
+                                        ${tp9OptIcon(TP9_ICON_PATHS.hideForYou)}
+                                        <span>Cacher la section « Pour vous »</span>
+                                        <span class="tp9-toggle-sub">Masque Stories et Série de visionnage en haut à gauche</span>
+                                    </span>
+                                    <span class="tp9-switch">
+                                        <input type="checkbox" class="tp9-hide-for-you">
+                                        <span class="tp9-switch-track"></span>
+                                    </span>
+                                </label>
+                                <label class="tp9-toggle-row"
+                                    data-tp9-tip="Cacher « Jouer sur Luna » (barre latérale)"
+                                    data-tp9-tip-sub="Masque la section Amazon Luna et ses jeux cloud dans la barre latérale gauche.">
+                                    <span class="tp9-toggle-label">
+                                        ${tp9OptIcon(TP9_ICON_PATHS.hideLuna)}
+                                        <span>Cacher « Jouer sur Luna »</span>
+                                        <span class="tp9-toggle-sub">Masque la section de jeux Amazon Luna à gauche</span>
+                                    </span>
+                                    <span class="tp9-switch">
+                                        <input type="checkbox" class="tp9-hide-luna">
                                         <span class="tp9-switch-track"></span>
                                     </span>
                                 </label>
@@ -8154,6 +8299,27 @@
                                         <span class="tp9-switch-track"></span>
                                     </span>
                                 </label>
+                                <label class="tp9-toggle-row"
+                                    data-tp9-tip="Masquer des catégories Twitch"
+                                    data-tp9-tip-sub="Cache les catégories choisies ainsi que tous les streamers qui les diffusent (barre latérale, accueil, parcourir, recherche).">
+                                    <span class="tp9-toggle-label">
+                                        ${tp9OptIcon(TP9_ICON_PATHS.hideCategory)}
+                                        <span>Masquer des catégories & leurs streams</span>
+                                        <span class="tp9-toggle-sub">Cache la catégorie et tous les lives dessus partout sur Twitch</span>
+                                    </span>
+                                    <span class="tp9-switch">
+                                        <input type="checkbox" class="tp9-hide-categories">
+                                        <span class="tp9-switch-track"></span>
+                                    </span>
+                                </label>
+                                <div class="tp9-kw-editor tp9-cat-editor">
+                                    <div class="tp9-kw-tags tp9-cat-tags"></div>
+                                    <div class="tp9-kw-input-row">
+                                        <input type="text" class="tp9-kw-input tp9-cat-input" placeholder="Ajouter une catégorie (ex: Grand Theft Auto VI)…" autocomplete="off">
+                                        <button type="button" class="tp9-kw-add tp9-cat-add">+</button>
+                                    </div>
+                                    <div class="tp9-cat-suggest" style="display:none;" data-tp9-raw="1"></div>
+                                </div>
                                 <label class="tp9-toggle-row"
                                     data-tp9-tip="Offre « sans publicité »"
                                     data-tp9-tip-sub="Masque le bouton « Essayez 1 mois sans publicité » en haut de la page.">
@@ -8527,8 +8693,12 @@
             ['.tp9-close-banners', 'closeBanners'],
             ['.tp9-sidebar-preview', 'sidebarPreview'],
             ['.tp9-expand-sidebar', 'autoExpandSidebar'],
+            ['.tp9-expand-home-live', 'autoExpandHomeLive'],
             ['.tp9-hide-offline', 'hideOfflineChannels'],
+            ['.tp9-hide-for-you', 'hideForYou'],
+            ['.tp9-hide-luna', 'hideLuna'],
             ['.tp9-hide-recom', 'hideRecom'],
+            ['.tp9-hide-categories', 'hideCategories'],
             ['.tp9-hide-chat-carousel', 'hideChatCarousel']
         ].forEach(function (pair) {
             var el = dashboard.querySelector(pair[0]);
@@ -8543,6 +8713,9 @@
                 }
                 if (pair[1] === 'autoExpandSidebar' && typeof handleExpandSidebarToggle === 'function') {
                     handleExpandSidebarToggle(event.target.checked);
+                }
+                if (pair[1] === 'autoExpandHomeLive' && typeof handleExpandHomeLiveToggle === 'function') {
+                    handleExpandHomeLiveToggle(event.target.checked);
                 }
                 if (
                     (pair[1] === 'noHomeAutoplay' || pair[1] === 'noOfflineAutoplay' || pair[1] === 'noVodAutoplay') &&
@@ -8586,6 +8759,20 @@
             });
         }
 
+        var hoverModeSelect = dashboard.querySelector('.tp9-hover-pause-mode');
+        if (hoverModeSelect) {
+            hoverModeSelect.addEventListener('click', function (e) { e.stopPropagation(); });
+            hoverModeSelect.addEventListener('change', function (e) {
+                var mVal = e.target.value === 'keep' ? 'keep' : 'always';
+                pageConfig.hoverPauseMode = mVal;
+                if (mVal === 'always' && typeof clearChatManualScrollLatch === 'function') {
+                    clearChatManualScrollLatch();
+                }
+                saveConfig(pageConfig);
+                broadcastConfig();
+            });
+        }
+
         // Ajout de mots-clés (Highlight & Blacklist)
         function bindKeywordAdder(inputSel, btnSel, listKey, type) {
             var inp = dashboard.querySelector(inputSel);
@@ -8618,6 +8805,160 @@
         }
         bindKeywordAdder('.tp9-hl-input', '.tp9-hl-add', 'highlightWords', 'hl');
         bindKeywordAdder('.tp9-bl-input', '.tp9-bl-add', 'blacklistWords', 'bl');
+
+        // Ajout de catégories masquées avec autocomplétion Twitch GraphQL (nom + jaquette + slug exact)
+        (function bindCategoryAdder() {
+            var inp = dashboard.querySelector('.tp9-cat-input');
+            var btn = dashboard.querySelector('.tp9-cat-add');
+            var sugBox = dashboard.querySelector('.tp9-cat-suggest');
+            if (!inp || !btn) return;
+            var sugItems = [];
+            var sugIdx = -1;
+            var sugTimer = null;
+            var sugSeq = 0;
+
+            function hideSuggestions() {
+                sugItems = [];
+                sugIdx = -1;
+                if (sugBox) {
+                    sugBox.style.display = 'none';
+                    sugBox.innerHTML = '';
+                }
+            }
+
+            function commitCategory(labelStr, metaObj) {
+                var cleanLabel = (labelStr || '').trim();
+                if (!cleanLabel) return;
+                if (!Array.isArray(pageConfig.blockedCategories)) pageConfig.blockedCategories = [];
+                if (!pageConfig.blockedCategoryMeta || typeof pageConfig.blockedCategoryMeta !== 'object') {
+                    pageConfig.blockedCategoryMeta = {};
+                }
+                var normNew = typeof normalizeCategoryKey === 'function' ? normalizeCategoryKey(cleanLabel) : cleanLabel.toLowerCase();
+                var already = pageConfig.blockedCategories.some(function (existing) {
+                    var nEx = typeof normalizeCategoryKey === 'function' ? normalizeCategoryKey(existing) : String(existing).toLowerCase();
+                    return nEx === normNew;
+                });
+                if (metaObj && normNew) {
+                    pageConfig.blockedCategoryMeta[normNew] = {
+                        slug: String(metaObj.slug || '').trim().toLowerCase(),
+                        name: String(metaObj.name || cleanLabel).trim(),
+                        displayName: String(metaObj.displayName || cleanLabel).trim()
+                    };
+                }
+                if (!already) {
+                    pageConfig.blockedCategories.push(cleanLabel);
+                }
+                saveConfig(pageConfig);
+                broadcastConfig();
+                renderKeywordTags('cat');
+                if (typeof syncBttvFeatures === 'function') syncBttvFeatures();
+                if (!metaObj && typeof resolveBlockedCategorySlugAsync === 'function') {
+                    resolveBlockedCategorySlugAsync(cleanLabel);
+                }
+                inp.value = '';
+                hideSuggestions();
+            }
+
+            function renderSuggestions() {
+                if (!sugBox || !sugItems.length) {
+                    hideSuggestions();
+                    return;
+                }
+                sugBox.innerHTML = sugItems.map(function (it, i) {
+                    var activeCls = i === sugIdx ? ' tp9-cat-sug-active' : '';
+                    var imgHtml = it.boxArt
+                        ? '<img class="tp9-cat-sug-art" src="' + escapeHTML(it.boxArt) + '" alt="">'
+                        : '<span class="tp9-cat-sug-art tp9-cat-sug-art-empty"></span>';
+                    var subTxt = (it.name && it.displayName && it.name.toLowerCase() !== it.displayName.toLowerCase())
+                        ? '<span class="tp9-cat-sug-sub">' + escapeHTML(it.name) + '</span>'
+                        : '';
+                    return '<div class="tp9-cat-sug-item' + activeCls + '" data-sidx="' + i + '">' +
+                        imgHtml +
+                        '<span class="tp9-cat-sug-txt">' +
+                            '<span class="tp9-cat-sug-title">' + escapeHTML(it.displayName || it.name) + '</span>' +
+                            subTxt +
+                        '</span>' +
+                    '</div>';
+                }).join('');
+                sugBox.style.display = 'block';
+                sugBox.querySelectorAll('.tp9-cat-sug-item').forEach(function (el) {
+                    el.addEventListener('mousedown', function (ev) {
+                        ev.preventDefault();
+                        ev.stopPropagation();
+                        var idx = parseInt(el.getAttribute('data-sidx'), 10);
+                        var chosen = sugItems[idx];
+                        if (chosen) {
+                            commitCategory(chosen.displayName || chosen.name, chosen);
+                        }
+                    });
+                });
+            }
+
+            inp.addEventListener('input', function () {
+                var q = (inp.value || '').trim();
+                if (sugTimer) clearTimeout(sugTimer);
+                if (q.length < 2 || typeof searchTwitchCategoriesGql !== 'function') {
+                    hideSuggestions();
+                    return;
+                }
+                var mySeq = ++sugSeq;
+                sugTimer = setTimeout(function () {
+                    searchTwitchCategoriesGql(q, 6).then(function (results) {
+                        if (mySeq !== sugSeq || (inp.value || '').trim() !== q) return;
+                        sugItems = Array.isArray(results) ? results : [];
+                        sugIdx = -1;
+                        renderSuggestions();
+                    });
+                }, 220);
+            });
+
+            inp.addEventListener('keydown', function (e) {
+                e.stopPropagation();
+                if (sugItems.length > 0 && sugBox && sugBox.style.display !== 'none') {
+                    if (e.key === 'ArrowDown') {
+                        e.preventDefault();
+                        sugIdx = (sugIdx + 1) % sugItems.length;
+                        renderSuggestions();
+                        return;
+                    }
+                    if (e.key === 'ArrowUp') {
+                        e.preventDefault();
+                        sugIdx = (sugIdx - 1 + sugItems.length) % sugItems.length;
+                        renderSuggestions();
+                        return;
+                    }
+                    if (e.key === 'Escape') {
+                        e.preventDefault();
+                        hideSuggestions();
+                        return;
+                    }
+                    if (e.key === 'Enter' && sugIdx >= 0 && sugItems[sugIdx]) {
+                        e.preventDefault();
+                        var picked = sugItems[sugIdx];
+                        commitCategory(picked.displayName || picked.name, picked);
+                        return;
+                    }
+                }
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    commitCategory(inp.value, null);
+                }
+            });
+
+            inp.addEventListener('blur', function () {
+                setTimeout(hideSuggestions, 160);
+            });
+
+            btn.addEventListener('click', function (e) {
+                e.stopPropagation();
+                if (sugIdx >= 0 && sugItems[sugIdx]) {
+                    var picked = sugItems[sugIdx];
+                    commitCategory(picked.displayName || picked.name, picked);
+                } else {
+                    commitCategory(inp.value, null);
+                }
+            });
+        })();
 
         dashboard
             .querySelector('.tp9-close')
@@ -9882,8 +10223,12 @@
             ['.tp9-close-banners', !!pageConfig.closeBanners],
             ['.tp9-sidebar-preview', pageConfig.sidebarPreview !== false],
             ['.tp9-expand-sidebar', !!pageConfig.autoExpandSidebar],
+            ['.tp9-expand-home-live', !!pageConfig.autoExpandHomeLive],
             ['.tp9-hide-offline', !!pageConfig.hideOfflineChannels],
+            ['.tp9-hide-for-you', !!pageConfig.hideForYou],
+            ['.tp9-hide-luna', !!pageConfig.hideLuna],
             ['.tp9-hide-recom', !!pageConfig.hideRecom],
+            ['.tp9-hide-categories', pageConfig.hideCategories !== false],
             ['.tp9-hide-chat-carousel', !!pageConfig.hideChatCarousel]
         ].forEach(function (pair) {
             var el = dashboard.querySelector(pair[0]);
@@ -9901,11 +10246,14 @@
         if (hlColEl) hlColEl.value = pageConfig.highlightColor || '#9147ff';
         var slowRateEl = dashboard.querySelector('.tp9-slow-chat-rate');
         if (slowRateEl) slowRateEl.value = String(pageConfig.slowChatRate || 2);
+        var hoverModeEl = dashboard.querySelector('.tp9-hover-pause-mode');
+        if (hoverModeEl) hoverModeEl.value = pageConfig.hoverPauseMode === 'keep' ? 'keep' : 'always';
 
         updateMenuVolumeUI();
         updateQuickStatsPane();
         renderKeywordTags('hl');
         renderKeywordTags('bl');
+        renderKeywordTags('cat');
 
         updateActiveProxyDisplay();
     }
@@ -14374,8 +14722,11 @@ function showAddProxyForm() {
             dvrReleaseAudioBridge();
             return;
         }
-        if (!dvrLiveVideo || !dvrLiveVideo.isConnected) dvrFindLivePlayer();
-        var video = (dvrLiveVideo && dvrLiveVideo.isConnected) ? dvrLiveVideo : (fallbackVideo || findPlaybackVideo());
+        var spTargetVideo = (needSpBridge && !needDvrBridge && typeof spPlaybackVideo === 'function')
+            ? spPlaybackVideo()
+            : null;
+        if (!spTargetVideo && (!dvrLiveVideo || !dvrLiveVideo.isConnected)) dvrFindLivePlayer();
+        var video = spTargetVideo || ((dvrLiveVideo && dvrLiveVideo.isConnected) ? dvrLiveVideo : (fallbackVideo || findPlaybackVideo()));
         if (dvrAudioBridge && dvrAudioBridge.video === video) {
             if (nativeMediaMutedDesc && nativeMediaMutedDesc.set) {
                 try { nativeMediaMutedDesc.set.call(video, true); } catch (e) {}
@@ -14420,7 +14771,7 @@ function showAddProxyForm() {
                 set: function (value) {
                     // The media setter validates volume; physical mute stays on.
                     if (!dvrAllowDirectVolumeWrite && !isNativeVolumeUserActive()) {
-                        var savedBg = getSavedChannelVolume(getTestChannel());
+                        var savedBg = getSavedChannelVolume(spAutoplayChannel || getTestChannel());
                         if (savedBg !== null) {
                             var expBg = Math.max(0, Math.min(1, savedBg));
                             bridge.descriptors.volume.set.call(video, expBg);
@@ -15983,7 +16334,7 @@ function showAddProxyForm() {
                 'tp9-hide-turbo', 'tp9-hide-subs', 'tp9-hide-promo', 'tp9-hide-chat-carousel', 'tp9-wheel-lock-on',
                 'tp9-bttv-split-chat', 'tp9-bttv-chat-left', 'tp9-bttv-reverse-chat',
                 'tp9-bttv-big-emotes', 'tp9-bttv-hide-badges', 'tp9-bttv-hide-notices',
-                'tp9-bttv-hide-offline', 'tp9-bttv-hide-recom', 'tp9-bttv-close-banners',
+                'tp9-bttv-hide-offline', 'tp9-hide-for-you', 'tp9-hide-luna', 'tp9-bttv-hide-recom', 'tp9-hide-categories', 'tp9-bttv-close-banners',
                 'tp9-bttv-role-hl', 'tp9-bttv-chat-ts', 'tp9-bttv-bot-badges',
                 'tp9-bttv-hide-bots', 'tp9-bttv-hl-kw', 'tp9-bttv-hl-mentions',
                 'tp9-bttv-reply-nav', 'tp9-bttv-uncensor'
@@ -16021,6 +16372,18 @@ function showAddProxyForm() {
             if (typeof ensureChatBannerObserver === 'function') {
                 ensureChatBannerObserver();
             }
+            if (typeof sweepSidebarForYouSection === 'function') {
+                sweepSidebarForYouSection();
+            }
+            if (typeof sweepSidebarLunaSection === 'function') {
+                sweepSidebarLunaSection();
+            }
+            if (typeof syncBlockedCategoriesState === 'function') {
+                syncBlockedCategoriesState();
+            }
+            if (typeof sweepSidebarRedundantShowMoreButtons === 'function') {
+                sweepSidebarRedundantShowMoreButtons();
+            }
             return;
         }
         document.body.classList.toggle('tp9-hide-turbo', !!pageConfig.hideTwitchTurbo);
@@ -16035,7 +16398,13 @@ function showAddProxyForm() {
         document.body.classList.toggle('tp9-bttv-hide-badges', !!pageConfig.hideBadges);
         document.body.classList.toggle('tp9-bttv-hide-notices', !!pageConfig.hideChatNotices);
         document.body.classList.toggle('tp9-bttv-hide-offline', !!pageConfig.hideOfflineChannels);
+        document.body.classList.toggle('tp9-hide-for-you', !!pageConfig.hideForYou);
+        document.body.classList.toggle('tp9-hide-luna', !!pageConfig.hideLuna);
         document.body.classList.toggle('tp9-bttv-hide-recom', !!pageConfig.hideRecom);
+        document.body.classList.toggle(
+            'tp9-hide-categories',
+            pageConfig.hideCategories !== false && Array.isArray(pageConfig.blockedCategories) && pageConfig.blockedCategories.length > 0
+        );
         document.body.classList.toggle('tp9-bttv-close-banners', !!pageConfig.closeBanners);
         document.body.classList.toggle('tp9-bttv-role-hl', pageConfig.roleHighlights !== false);
         document.body.classList.toggle('tp9-bttv-chat-ts', !!pageConfig.chatTimestamps);
@@ -16075,6 +16444,21 @@ function showAddProxyForm() {
         if (typeof sweepOfflineSidebarChannels === 'function') {
             sweepOfflineSidebarChannels();
         }
+        if (typeof sweepSidebarForYouSection === 'function') {
+            sweepSidebarForYouSection();
+        }
+        if (typeof sweepSidebarLunaSection === 'function') {
+            sweepSidebarLunaSection();
+        }
+        if (typeof syncBlockedCategoriesState === 'function') {
+            syncBlockedCategoriesState();
+        }
+        if (typeof sweepSidebarRedundantShowMoreButtons === 'function') {
+            sweepSidebarRedundantShowMoreButtons();
+        }
+        if (pageConfig.autoExpandHomeLive && typeof expandHomeRecommendedLiveShelf === 'function') {
+            expandHomeRecommendedLiveShelf(false);
+        }
     }
 
     // Liste des messages du tchat : elle change plusieurs fois par
@@ -16109,13 +16493,27 @@ function showAddProxyForm() {
         if (mutationsOnlyInChat(records)) {
             return;
         }
+        var hasBlockedCats = Boolean(
+            pageConfig.hideCategories !== false &&
+            Array.isArray(pageConfig.blockedCategories) &&
+            pageConfig.blockedCategories.length > 0
+        );
+        var onHomeForExpand = Boolean(
+            pageConfig.autoExpandHomeLive &&
+            typeof location !== 'undefined' &&
+            ((location.pathname || '/') === '/' || location.pathname === '')
+        );
         if (
             !pageConfig.hideTwitchTurbo &&
             !pageConfig.hideTwitchSubButtons &&
             !pageConfig.hideTwitchPromo &&
             !pageConfig.hideChatCarousel &&
             !pageConfig.closeBanners &&
-            !pageConfig.hideOfflineChannels
+            !pageConfig.hideOfflineChannels &&
+            !pageConfig.hideForYou &&
+            !pageConfig.hideLuna &&
+            !onHomeForExpand &&
+            !hasBlockedCats
         ) {
             return;
         }
@@ -16135,6 +16533,21 @@ function showAddProxyForm() {
                     }
                     if (typeof sweepOfflineSidebarChannels === 'function') {
                         sweepOfflineSidebarChannels();
+                    }
+                    if (typeof sweepSidebarForYouSection === 'function') {
+                        sweepSidebarForYouSection();
+                    }
+                    if (typeof sweepSidebarLunaSection === 'function') {
+                        sweepSidebarLunaSection();
+                    }
+                    if (onHomeForExpand && typeof expandHomeRecommendedLiveShelf === 'function') {
+                        expandHomeRecommendedLiveShelf(false);
+                    }
+                    if (hasBlockedCats && typeof sweepBlockedCategories === 'function') {
+                        sweepBlockedCategories();
+                    }
+                    if (typeof sweepSidebarRedundantShowMoreButtons === 'function') {
+                        sweepSidebarRedundantShowMoreButtons();
                     }
                 } catch (e) {}
             });
@@ -27290,6 +27703,68 @@ dashboardButton.style.visibility = 'hidden';
                 color: #ff9eac;
                 border: 1px solid rgba(255, 92, 119, 0.32);
             }
+            #tp9-dashboard .tp9-kw-cat {
+                background: rgba(255, 168, 52, 0.17);
+                color: #ffd08a;
+                border: 1px solid rgba(255, 168, 52, 0.34);
+            }
+            #tp9-dashboard .tp9-cat-editor {
+                position: relative;
+            }
+            #tp9-dashboard .tp9-cat-suggest {
+                margin-top: 5px;
+                max-height: 196px;
+                overflow-y: auto;
+                border-radius: 7px;
+                background: #14141d;
+                border: 1px solid rgba(145, 71, 255, 0.38);
+                box-shadow: 0 8px 22px rgba(0, 0, 0, 0.65);
+                scrollbar-width: thin;
+            }
+            #tp9-dashboard .tp9-cat-sug-item {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                padding: 5px 8px;
+                cursor: pointer;
+                border-bottom: 1px solid rgba(255, 255, 255, 0.045);
+                transition: background .12s;
+            }
+            #tp9-dashboard .tp9-cat-sug-item:last-child {
+                border-bottom: 0;
+            }
+            #tp9-dashboard .tp9-cat-sug-item:hover,
+            #tp9-dashboard .tp9-cat-sug-item.tp9-cat-sug-active {
+                background: rgba(145, 71, 255, 0.22);
+            }
+            #tp9-dashboard .tp9-cat-sug-art {
+                width: 20px;
+                height: 27px;
+                border-radius: 3px;
+                object-fit: cover;
+                background: rgba(255, 255, 255, 0.07);
+                flex: none;
+            }
+            #tp9-dashboard .tp9-cat-sug-txt {
+                display: flex;
+                flex-direction: column;
+                min-width: 0;
+            }
+            #tp9-dashboard .tp9-cat-sug-title {
+                font-size: 11.5px;
+                font-weight: 600;
+                color: #f2f2f7;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+            #tp9-dashboard .tp9-cat-sug-sub {
+                font-size: 9.5px;
+                color: #8f8fa3;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
             #tp9-dashboard .tp9-kw-del {
                 border: 0;
                 background: transparent;
@@ -27487,6 +27962,39 @@ dashboardButton.style.visibility = 'hidden';
             body.tp9-bttv-hide-offline .tw-transition:has(> .side-nav-card .side-nav-card__avatar--offline),
             body.tp9-bttv-hide-offline [data-test-selector="followed-channel"]:has(.side-nav-card__avatar--offline) {
                 display: none !important;
+            }
+            body.tp9-hide-for-you .tp9-foryou-hidden,
+            body.tp9-hide-for-you #side-nav button[aria-label*="stories" i]:not([data-a-target="side-nav-arrow"]),
+            body.tp9-hide-for-you [data-a-target="side-nav-bar"] button[aria-label*="stories" i]:not([data-a-target="side-nav-arrow"]) {
+                display: none !important;
+            }
+            body.tp9-hide-for-you .tp9-foryou-topbar-compact {
+                justify-content: flex-end !important;
+                min-height: 0 !important;
+            }
+            body.tp9-hide-luna .tp9-luna-hidden,
+            body.tp9-hide-luna #side-nav .side-nav-section:has(a[href*="luna.amazon." i]):not(:has(a[href^="/"])):not(:has(.side-nav-card)),
+            body.tp9-hide-luna [data-a-target="side-nav-bar"] .side-nav-section:has(a[href*="luna.amazon." i]):not(:has(a[href^="/"])):not(:has(.side-nav-card)),
+            body.tp9-hide-luna #side-nav a[href*="luna.amazon." i],
+            body.tp9-hide-luna [data-a-target="side-nav-bar"] a[href*="luna.amazon." i],
+            html:not([data-tp9-off="1"]) .tp9-sidebar-toggle-hidden {
+                display: none !important;
+            }
+            body.tp9-hide-categories .tp9-blocked-category-hidden,
+            body.tp9-hide-categories .tp9-blocked-shelf-hidden,
+            body.tp9-hide-categories .side-nav .tp9-blocked-category-hidden,
+            body.tp9-hide-categories .tw-transition:has(> .tp9-blocked-category-hidden),
+            body.tp9-hide-categories [class*="ScTransition"]:has(> .tp9-blocked-category-hidden) {
+                display: none !important;
+            }
+            body.tp9-hide-categories .tp9-row-capped-cards {
+                justify-content: flex-start !important;
+            }
+            body.tp9-hide-categories .tp9-row-capped-cards > *:not(.tp9-blocked-category-hidden):not(.tw-tower__placeholder):not([class*="ScTowerPlaceholder"]) {
+                flex-grow: 0 !important;
+                flex-basis: var(--tp9-card-slot-w, 25%) !important;
+                width: var(--tp9-card-slot-w, 25%) !important;
+                max-width: var(--tp9-card-slot-w, 25%) !important;
             }
             body.tp9-bttv-hide-recom [aria-label*="Chaînes recommandées" i],
             body.tp9-bttv-hide-recom [aria-label*="Recommended Channels" i],
@@ -41057,9 +41565,72 @@ dashboardButton.style.visibility = 'hidden';
         (document.head || document.documentElement).appendChild(style);
     }
 
+    function spFindMiniPlayerVideo() {
+        if (typeof document === 'undefined' || !document.querySelectorAll) {
+            return null;
+        }
+        try {
+            var vids = document.querySelectorAll(
+                '.persistent-player--mini video, [data-a-player-state="mini"] video, .persistent-player video, .video-player video'
+            );
+            for (var i = 0; i < vids.length; i++) {
+                var v = vids[i];
+                if (!v || isOwnPlayerVideo(v) || isPreviewOrAuxiliaryVideo(v) || isAdVideoElement(v)) {
+                    continue;
+                }
+                if (
+                    v.closest &&
+                    v.closest(
+                        '.front-page-carousel, [data-a-target="front-page-carousel"], ' +
+                        '[data-a-player-type="frontpage"], [class*="front-page-carousel"], ' +
+                        '[class*="featured-content-carousel"]'
+                    )
+                ) {
+                    continue;
+                }
+                if (
+                    isMiniPlayerVideo(v) ||
+                    (v.closest && v.closest('.persistent-player--mini, [data-a-player-state="mini"], .persistent-player'))
+                ) {
+                    return v;
+                }
+            }
+        } catch (e) {}
+        return null;
+    }
+
+    function spPlaybackVideo() {
+        if (typeof getTestChannel === 'function' && getTestChannel()) {
+            return adCleanPlaybackVideo();
+        }
+        return spFindMiniPlayerVideo();
+    }
+
+    function spGetActiveTargetChannel() {
+        var urlCh = typeof getTestChannel === 'function' ? getTestChannel() : null;
+        if (urlCh) {
+            return String(urlCh).toLowerCase();
+        }
+        var wCh = typeof getWatchedChannel === 'function' ? getWatchedChannel() : null;
+        if (wCh) {
+            return String(wCh).toLowerCase();
+        }
+        var miniV = spFindMiniPlayerVideo();
+        if (miniV) {
+            var floatCh =
+                (typeof getFloatingPlayerChannel === 'function' && getFloatingPlayerChannel(miniV)) ||
+                (typeof getLivePlayerChannel === 'function' && getLivePlayerChannel()) ||
+                spAutoplayChannel ||
+                (spAd && spAd.channel) ||
+                null;
+            return floatCh ? String(floatCh).toLowerCase() : null;
+        }
+        return null;
+    }
+
     function spPositionAutoplayOverlay(targetMainVideo) {
         if (!spAutoplayOverlay) return;
-        var mainVideo = targetMainVideo || adCleanPlaybackVideo();
+        var mainVideo = targetMainVideo || spPlaybackVideo();
         var host = mainVideo && mainVideo.parentElement;
         if (!host) return;
         if (spAutoplayOverlay.parentNode !== host || spAutoplayOverlay.previousSibling !== mainVideo) {
@@ -41157,13 +41728,13 @@ dashboardButton.style.visibility = 'hidden';
     function spSetMainMutedForAd(mute) {
         var next = !!mute;
         if (spAutoplayMutingMain === next) {
-            dvrSyncVolumeFromPlayer();
+            dvrSyncVolumeFromPlayer(spPlaybackVideo());
             return;
         }
         spAutoplayMutingMain = next;
-        dvrSyncVolumeFromPlayer();
+        dvrSyncVolumeFromPlayer(spPlaybackVideo());
         if (!next) {
-            var mainVideo = adCleanPlaybackVideo();
+            var mainVideo = spPlaybackVideo();
             if (mainVideo) {
                 enforceSavedVolumeOnVideoSync(mainVideo);
             }
@@ -41176,9 +41747,9 @@ dashboardButton.style.visibility = 'hidden';
         if (spAutoplayOverlay) {
             spAutoplayOverlay.classList.toggle('tp9-sp-autoplay-visible', next);
         }
-        dvrSyncVolumeFromPlayer();
+        dvrSyncVolumeFromPlayer(spPlaybackVideo());
         if (spAutoplayVideo && !dvrAudioBridge) {
-            var saved = getSavedChannelVolume(spAutoplayChannel || getTestChannel());
+            var saved = getSavedChannelVolume(spAutoplayChannel || spGetActiveTargetChannel());
             var baseVol = saved !== null ? Math.max(0, Math.min(1, saved)) : 1;
             var userMuted = Boolean(dvrUserExplicitMuted || baseVol === 0);
             setVideoVolumeRaw(spAutoplayVideo, baseVol, next && (!dvrOverlay || dvrIsLive()) ? userMuted : true);
@@ -41371,7 +41942,7 @@ dashboardButton.style.visibility = 'hidden';
                         recordBandwidthBytes(ch, bytes, null, { viaProxy: false });
                     }
                     if (!spAutoplayAlignedOnce && !spAutoplayVisible && spMainAdBoundaryTime !== null) {
-                        var mainV = adCleanPlaybackVideo();
+                        var mainV = spPlaybackVideo();
                         var targetPdt = spEstimateMainCurrentPdt(mainV);
                         if (spAlignAutoplayToPdt(targetPdt)) {
                             spAutoplayAlignedOnce = true;
@@ -41408,7 +41979,7 @@ dashboardButton.style.visibility = 'hidden';
             return;
         }
         var ch = String(data.channel).trim().toLowerCase();
-        var watched = getTestChannel();
+        var watched = spGetActiveTargetChannel();
         if (!ch || (watched && watched.toLowerCase() !== ch)) {
             return;
         }
@@ -41417,7 +41988,7 @@ dashboardButton.style.visibility = 'hidden';
         if (spAutoplayActive && spAutoplayChannel === ch && spAutoplayOverlay && spAutoplayVideo) {
             spPositionAutoplayOverlay();
             if (!data.postAdLiveCount) {
-                var curMainForWatermark = adCleanPlaybackVideo();
+                var curMainForWatermark = spPlaybackVideo();
                 if (curMainForWatermark) {
                     spLastPureAdBufEnd = Math.max(spLastPureAdBufEnd, spBufferedEndAt(curMainForWatermark));
                 }
@@ -41457,7 +42028,7 @@ dashboardButton.style.visibility = 'hidden';
         spAutoplayOverlay = overlay;
         spAutoplayVideo = vid;
 
-        var mainVideo = adCleanPlaybackVideo();
+        var mainVideo = spPlaybackVideo();
         spPositionAutoplayOverlay(mainVideo);
         if (mainVideo && !data.postAdLiveCount) {
             spLastPureAdBufEnd = spBufferedEndAt(mainVideo);
@@ -41485,7 +42056,7 @@ dashboardButton.style.visibility = 'hidden';
                     spClearSwapTimer();
                     return;
                 }
-                var mv = adCleanPlaybackVideo();
+                var mv = spPlaybackVideo();
                 if (!mv) {
                     spSetMainMutedForAd(true);
                     spShowAutoplayVisual(true);
@@ -41558,7 +42129,7 @@ dashboardButton.style.visibility = 'hidden';
             spHideBadge();
             return;
         }
-        var mainVideo = adCleanPlaybackVideo();
+        var mainVideo = spPlaybackVideo();
         if (!mainVideo) {
             spStopAutoplayOverlay(true);
             spHideBadge();
@@ -41581,7 +42152,7 @@ dashboardButton.style.visibility = 'hidden';
         var postSeekBaseTime = 0;
         var retriedPostSeek = false;
         var appliedSeekDelta = 0;
-        var channel = (data && data.channel) || spAutoplayChannel || getTestChannel();
+        var channel = (data && data.channel) || spAutoplayChannel || spGetActiveTargetChannel();
 
         if (mainVideo.paused && !isUserExplicitlyPausedLive()) {
             try {
@@ -41595,7 +42166,7 @@ dashboardButton.style.visibility = 'hidden';
                 spCancelReturnToMain();
                 return;
             }
-            var mv = adCleanPlaybackVideo();
+            var mv = spPlaybackVideo();
             var now = Date.now();
             var elapsed = now - startedAt;
             if (!mv) {
@@ -41735,15 +42306,20 @@ dashboardButton.style.visibility = 'hidden';
     }
 
     function spHandleMessage(data) {
-        var activeTargetCh =
-            (typeof getTestChannel === 'function' && getTestChannel()) ||
-            (typeof getWatchedChannel === 'function' && getWatchedChannel()) ||
-            null;
+        var activeTargetCh = typeof spGetActiveTargetChannel === 'function'
+            ? spGetActiveTargetChannel()
+            : (
+                (typeof getTestChannel === 'function' && getTestChannel()) ||
+                (typeof getWatchedChannel === 'function' && getWatchedChannel()) ||
+                null
+            );
         if (data.type === 'spProxy403') {
             if (data.channel) {
-                spChannelProxy403[String(data.channel).toLowerCase()] = Date.now();
+                var ch403 = String(data.channel).toLowerCase();
+                spChannelProxy403[ch403] = Date.now();
                 if (
                     activeTargetCh &&
+                    String(activeTargetCh).toLowerCase() === ch403 &&
                     !isWatchingAdFreeDvrVod() &&
                     !(typeof expVodIsStartupGateActive === 'function' && expVodIsStartupGateActive())
                 ) {
@@ -41765,6 +42341,7 @@ dashboardButton.style.visibility = 'hidden';
         if (data.type === 'spPlayer') {
             if (
                 activeTargetCh &&
+                (!data.channel || String(data.channel).toLowerCase() === String(activeTargetCh).toLowerCase()) &&
                 !scriptIsOff() &&
                 !(typeof expVodIsPlayingVod === 'function' && expVodIsPlayingVod()) &&
                 !(typeof expVodIsStartupGateActive === 'function' && expVodIsStartupGateActive())
@@ -41786,6 +42363,9 @@ dashboardButton.style.visibility = 'hidden';
                 spAd.stripping = false;
                 spAd.searching = false;
                 spHideBadge();
+                return;
+            }
+            if (data.channel && String(data.channel).toLowerCase() !== String(activeTargetCh).toLowerCase()) {
                 return;
             }
             var wasSpAdActive = spAd.active;
@@ -42332,6 +42912,8 @@ dashboardButton.style.visibility = 'hidden';
             'background:#00e57a;transition:width .25s linear}' +
             '.tp9-sp-badge-timed{padding-bottom:8px}' +
             '.tp9-sp-badge-timed .tp9-sp-badge-bar{display:block}' +
+            '.persistent-player--mini .tp9-sp-badge,[data-a-player-state="mini"] .tp9-sp-badge{top:auto;bottom:6px;left:6px;padding:3px 8px 3px 6px;font-size:10.5px;gap:5px;max-width:calc(100% - 12px)}' +
+            '.persistent-player--mini .tp9-sp-badge-timed,[data-a-player-state="mini"] .tp9-sp-badge-timed{padding-bottom:5px}' +
             '@keyframes tp9-sp-badge-in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}' +
             '@keyframes tp9-sp-badge-pulse{0%{box-shadow:0 0 0 0 rgba(0,229,122,.6)}' +
             '70%{box-shadow:0 0 0 7px rgba(0,229,122,0)}100%{box-shadow:0 0 0 0 rgba(0,229,122,0)}}' +
@@ -42367,18 +42949,24 @@ dashboardButton.style.visibility = 'hidden';
     }
 
     function spUpdateBadge(data) {
+        var activeCh = typeof spGetActiveTargetChannel === 'function'
+            ? spGetActiveTargetChannel()
+            : getTestChannel();
         if (
             isWatchingAdFreeDvrVod() ||
             (typeof expVodIsStartupGateActive === 'function' && expVodIsStartupGateActive()) ||
             !data.active ||
             scriptIsOff() ||
             !data.channel ||
-            data.channel !== getTestChannel()
+            !activeCh ||
+            String(data.channel).toLowerCase() !== String(activeCh).toLowerCase()
         ) {
             spHideBadge();
             return;
         }
-        var player = document.querySelector('.video-player');
+        var targetVid = typeof spPlaybackVideo === 'function' ? spPlaybackVideo() : null;
+        var player = (targetVid && targetVid.closest && targetVid.closest('.video-player, [data-a-target="video-player"]')) ||
+            (getTestChannel() ? document.querySelector('.video-player') : null);
         if (!player) {
             return;
         }
@@ -42523,8 +43111,17 @@ dashboardButton.style.visibility = 'hidden';
             return;
         }
         var curCh = getTestChannel();
-        var watchedCh = curCh || (typeof getWatchedChannel === 'function' ? getWatchedChannel() : null);
+        var watchedCh = typeof spGetActiveTargetChannel === 'function'
+            ? spGetActiveTargetChannel()
+            : (curCh || (typeof getWatchedChannel === 'function' ? getWatchedChannel() : null));
         if (!watchedCh) {
+            if (spAutoplayActive) {
+                spStopAutoplayOverlay(true);
+                spAd.active = false;
+                spAd.stripping = false;
+                spAd.searching = false;
+                spHideBadge();
+            }
             spBuffer.same = 0;
             spBuffer.deadTicks = 0;
             spBuffer.rebufferTicks = 0;
@@ -42532,6 +43129,51 @@ dashboardButton.style.visibility = 'hidden';
         }
         if (curCh && !spAd.active && !(typeof expVodIsStartupGateActive === 'function' && expVodIsStartupGateActive())) {
             spWarmAutoplayForChannel(curCh);
+        }
+        // En mode lecteur réduit (mini-player hors page de chaîne) pendant une pub VAFT :
+        // maintient l'overlay autoplay et le muet sur la vidéo de pub sans parcourir le Fiber #root.
+        if (!curCh && (spAutoplayActive || (spAd.active && !proxyAdsOnlyOn()))) {
+            var miniNow = Date.now();
+            var miniVid = typeof spPlaybackVideo === 'function' ? spPlaybackVideo() : null;
+            spBuffer.same = 0;
+            spBuffer.deadTicks = 0;
+            spBuffer.rebufferTicks = 0;
+            if (!miniVid) {
+                if (spAutoplayActive) {
+                    spStopAutoplayOverlay(true);
+                }
+                spAd.active = false;
+                spAd.stripping = false;
+                spAd.searching = false;
+                spHideBadge();
+                return;
+            }
+            spPositionAutoplayOverlay(miniVid);
+            if (spAutoplayMutingMain) {
+                dvrSyncVolumeFromPlayer(miniVid);
+            }
+            if (miniVid.paused) {
+                try {
+                    var pMiniBg = miniVid.play();
+                    if (pMiniBg && typeof pMiniBg.catch === 'function') pMiniBg.catch(function () {});
+                } catch (eMiniBg) {}
+            }
+            if (spAutoplayVideo && spAutoplayVideo.paused && spAutoplayVideo.readyState >= 2) {
+                try {
+                    var pMiniFg = spAutoplayVideo.play();
+                    if (pMiniFg && typeof pMiniFg.catch === 'function') pMiniFg.catch(function () {});
+                } catch (eMiniFg) {}
+            }
+            if (spAd.active && spAd.lastUpdateAt > 0 && (miniNow - spAd.lastUpdateAt) > 25000) {
+                spHandleMessage({
+                    type: 'spAd',
+                    channel: spAd.channel || watchedCh,
+                    active: false,
+                    stripping: false,
+                    usedProxyInBreak: false
+                });
+            }
+            return;
         }
         var parts = spPlayerParts(false);
         if (!parts || !parts.player || !parts.state) {
@@ -46710,6 +47352,7 @@ dashboardButton.style.visibility = 'hidden';
             return;
         }
 
+        var prevChannel = lastKnownChannel;
         lastKnownChannel = channel;
 
         // Le passé d'une autre chaîne n'a plus rien à faire à
@@ -46720,7 +47363,23 @@ dashboardButton.style.visibility = 'hidden';
 
         dvrForgetMemory();
 
-        spStopAutoplayOverlay(true);
+        // Si l'utilisateur quitte la page d'une chaîne vers l'accueil ou Parcourir (!channel)
+        // alors que le lecteur persistant continue de jouer cette même chaîne en mini-player
+        // pendant un blocage de pub VAFT, on conserve impérativement l'overlay sans pub et le muet !
+        var continuingAdblockInMiniPlayer = Boolean(
+            !channel &&
+            prevChannel &&
+            typeof spFindMiniPlayerVideo === 'function' &&
+            spFindMiniPlayerVideo() &&
+            (
+                (spAutoplayActive && spAutoplayChannel === prevChannel.toLowerCase()) ||
+                (spAd.active && spAd.channel && spAd.channel.toLowerCase() === prevChannel.toLowerCase())
+            )
+        );
+
+        if (!continuingAdblockInMiniPlayer) {
+            spStopAutoplayOverlay(true);
+        }
 
         var livePageCh = typeof expVodGetLivePageChannel === 'function'
             ? expVodGetLivePageChannel()
@@ -46739,17 +47398,32 @@ dashboardButton.style.visibility = 'hidden';
             expVodBeginStartupGate(livePageCh);
         }
 
-        // Pub encore « en cours » sur la chaîne qu'on quitte (stream
-        // coupé en pleine pub, départ pendant la pub) : on la clôt ici.
-        // Restée ouverte, elle faisait ignorer la première pub de la
-        // chaîne suivante, qui n'était alors jamais comptée.
-        if (spAd.active) {
-            spHandleMessage({ type: 'spAd', channel: spAd.channel, active: false, stripping: false });
+        if (continuingAdblockInMiniPlayer) {
+            [0, 60, 180, 450].forEach(function (delayMs) {
+                setTimeout(function () {
+                    if (!spAutoplayActive) return;
+                    var mv = typeof spPlaybackVideo === 'function' ? spPlaybackVideo() : null;
+                    if (!mv) return;
+                    spPositionAutoplayOverlay(mv);
+                    if (spAutoplayMutingMain) {
+                        dvrSyncVolumeFromPlayer(mv);
+                    }
+                    if (spBadgeData) {
+                        spUpdateBadge(spBadgeData);
+                    }
+                }, delayMs);
+            });
+        } else {
+            // Pub encore « en cours » sur la chaîne qu'on quitte (stream
+            // coupé en pleine pub, départ vers une autre chaîne) : on la clôt ici.
+            if (spAd.active) {
+                spHandleMessage({ type: 'spAd', channel: spAd.channel, active: false, stripping: false });
+            }
+            spCurrentAdKey = null;
+            spAdBreakState = null;
+            spHideBadge();
+            spResetStreamStats(channel);
         }
-        spCurrentAdKey = null;
-        spAdBreakState = null;
-        spHideBadge();
-        spResetStreamStats(channel);
         renderAdblockStats();
         updateActiveProxyDisplay();
         if (dashboardVisible) {
@@ -46921,6 +47595,7 @@ dashboardButton.style.visibility = 'hidden';
     var bttvHoverOverflowAnchorSaved = false;
     var bttvInternalScrollWrite = false;
     var bttvManualMovedAway = false;
+    var bttvManualScrollLatched = false;
     var bttvLastAwayWheelAt = 0;
     var bttvScrollIntoViewHooked = false;
     var bttvSplitAlt = false;
@@ -51277,6 +51952,10 @@ dashboardButton.style.visibility = 'hidden';
         }
     }
 
+    function clearChatManualScrollLatch() {
+        bttvManualScrollLatched = false;
+    }
+
     function releaseChatHoverPause(snapToLive) {
         var wasPaused = bttvChatHoverPaused;
         var wasManual = bttvChatManualScrolled;
@@ -51301,6 +51980,7 @@ dashboardButton.style.visibility = 'hidden';
         bttvHoverActiveScroller = null;
 
         if (snapToLive === false) return;
+        bttvManualScrollLatched = false;
         if (typeof hideChatJumpBackPill === 'function') {
             hideChatJumpBackPill();
         }
@@ -51323,7 +52003,7 @@ dashboardButton.style.visibility = 'hidden';
 
     function isChatScrollerNearLiveEdge(scroller, maxDist) {
         if (!scroller || scroller.isConnected === false || scriptIsOff()) return false;
-        if (bttvChatHoverPaused || bttvChatManualScrolled || isChatHoverScrollLocked(scroller)) return false;
+        if (bttvManualScrollLatched || bttvChatHoverPaused || bttvChatManualScrolled || isChatHoverScrollLocked(scroller)) return false;
         if (typeof bttvJumpBackPill !== 'undefined' && bttvJumpBackPill && bttvJumpBackPill.style && bttvJumpBackPill.style.display !== 'none') {
             return false;
         }
@@ -51339,7 +52019,7 @@ dashboardButton.style.visibility = 'hidden';
 
     function scheduleChatLiveEdgePin(scroller) {
         if (!scroller || scroller.isConnected === false || scriptIsOff()) return;
-        if (bttvChatHoverPaused || bttvChatManualScrolled || isChatHoverScrollLocked(scroller)) return;
+        if (bttvManualScrollLatched || bttvChatHoverPaused || bttvChatManualScrolled || isChatHoverScrollLocked(scroller)) return;
         var isRev = !!pageConfig.reverseChat;
         setRawChatScrollTop(scroller, isRev ? 0 : scroller.scrollHeight);
         if (typeof requestAnimationFrame === 'function' && !bttvLivePinRaf) {
@@ -51358,6 +52038,7 @@ dashboardButton.style.visibility = 'hidden';
     function ensureChatObserver() {
         var container = document.querySelector('.chat-scrollable-area__message-container, [data-test-selector="chat-scrollable-area__message-container"]');
         if (!container || container === bttvObservedChatNode) return;
+        bttvManualScrollLatched = false;
         if (bttvChatHoverPaused) {
             releaseChatHoverPause(false);
         }
@@ -51496,17 +52177,23 @@ dashboardButton.style.visibility = 'hidden';
                             hideChatJumpBackPill();
                         }
                     }
-                    if (!bttvChatHoverPaused || bttvInternalScrollWrite) return;
+                    if (bttvInternalScrollWrite) return;
                     var isRev = !!pageConfig.reverseChat;
                     var curSt = getRawChatScrollTop(sc);
                     var distFromLive = isRev
                         ? curSt
                         : (sc.scrollHeight - curSt - sc.clientHeight);
+                    if (bttvManualScrollLatched && distFromLive <= 8 && Date.now() > bttvLastAwayWheelAt + 120) {
+                        bttvManualScrollLatched = false;
+                    }
+                    if (!bttvChatHoverPaused) return;
                     if (bttvChatManualScrolled) {
                         if (distFromLive > 18) {
                             bttvManualMovedAway = true;
+                            bttvManualScrollLatched = true;
                         } else if (bttvManualMovedAway && distFromLive <= 6 && Date.now() > bttvLastAwayWheelAt + 120) {
                             bttvManualMovedAway = false;
+                            bttvManualScrollLatched = false;
                             bttvChatManualScrolled = false;
                             if (!bttvHoverOverflowAnchorSaved) {
                                 bttvHoverOrigOverflowAnchor = sc.style.overflowAnchor || '';
@@ -51518,6 +52205,18 @@ dashboardButton.style.visibility = 'hidden';
                     }
                 }, { passive: true });
             };
+
+            var chatScopeForResumeClick = getChatRoomScope(container);
+            if (chatScopeForResumeClick && chatScopeForResumeClick.addEventListener && !chatScopeForResumeClick.__tp9ResumeBannerClickBound) {
+                chatScopeForResumeClick.__tp9ResumeBannerClickBound = true;
+                chatScopeForResumeClick.addEventListener('click', function (ev) {
+                    if (!bttvManualScrollLatched) return;
+                    var t = ev && ev.target;
+                    if (t && t.nodeType === 1 && findChatPauseFloatingAncestor(t, bttvObservedChatNode || container)) {
+                        bttvManualScrollLatched = false;
+                    }
+                }, true);
+            }
 
             var engageChatHoverPause = function () {
                 if (scriptIsOff() || pageConfig.hoverPause === false) return;
@@ -51547,14 +52246,15 @@ dashboardButton.style.visibility = 'hidden';
                 bttvHoverActiveScroller = scroller;
                 bttvChatHoverPaused = true;
 
-                // Si le tchat était déjà remonté plus haut, on garde le mode défilement manuel sans figer l'ancre,
-                // tout en assurant un retour propre au direct à la sortie de la souris.
-                if (distFromLive > 35) {
+                // Si le tchat était déjà remonté plus haut (ou verrouillé en mode « Garder si molette »),
+                // on conserve le mode défilement manuel sans figer l'ancre.
+                if (distFromLive > 35 || (pageConfig.hoverPauseMode === 'keep' && bttvManualScrollLatched && distFromLive > 8)) {
                     bttvChatManualScrolled = true;
                     bttvChatNotifiedTwitchPause = true;
                     bttvManualMovedAway = true;
                     return;
                 }
+                bttvManualScrollLatched = false;
 
                 bttvChatManualScrolled = false;
                 bttvChatNotifiedTwitchPause = false;
@@ -51572,22 +52272,41 @@ dashboardButton.style.visibility = 'hidden';
 
             var handleChatHoverLeave = function () {
                 hoverZone.__tp9MouseInside = false;
+                var keepManual = pageConfig.hoverPauseMode === 'keep';
+                var activeContainer = bttvObservedChatNode || container;
+                var sc = bttvHoverActiveScroller || resolveChatScroller(activeContainer);
+                if (keepManual && sc) {
+                    var isRevKeep = !!pageConfig.reverseChat;
+                    var curStKeep = getRawChatScrollTop(sc);
+                    var distKeep = isRevKeep ? curStKeep : (sc.scrollHeight - curStKeep - scrollerClientHeightSafe(sc));
+                    if ((bttvManualScrollLatched || (bttvChatManualScrolled && bttvManualMovedAway) || (bttvChatManualScrolled && distKeep > 14)) && distKeep > 8) {
+                        bttvManualScrollLatched = true;
+                        releaseChatHoverPause(false);
+                        return;
+                    }
+                }
                 if (bttvChatHoverPaused) {
                     releaseChatHoverPause(true);
                     return;
                 }
                 if (!scriptIsOff() && pageConfig.hoverPause !== false) {
-                    var activeContainer = bttvObservedChatNode || container;
-                    var sc = resolveChatScroller(activeContainer);
                     if (sc) {
                         var isRev = !!pageConfig.reverseChat;
                         var curSt = getRawChatScrollTop(sc);
                         var dist = isRev ? curSt : (sc.scrollHeight - curSt - sc.clientHeight);
+                        if (keepManual && bttvManualScrollLatched && dist > 8) {
+                            return;
+                        }
                         if (dist > 5 || findBestTwitchChatPauseBannerTarget(activeContainer)) {
+                            bttvManualScrollLatched = false;
                             resumeTwitchChatToLive(activeContainer, sc);
                         }
                     }
                 }
+            };
+
+            var scrollerClientHeightSafe = function (el) {
+                return (el && el.clientHeight) || 0;
             };
 
             var handleManualPauseBannerClick = function () {
@@ -51596,6 +52315,7 @@ dashboardButton.style.visibility = 'hidden';
                 bttvChatHoverPaused = false;
                 bttvChatManualScrolled = false;
                 bttvManualMovedAway = false;
+                bttvManualScrollLatched = false;
                 if (sc) {
                     setRawChatScrollTop(sc, pageConfig.reverseChat ? 0 : sc.scrollHeight);
                 }
@@ -54472,10 +55192,15 @@ dashboardButton.style.visibility = 'hidden';
             if (pageConfig.sidebarPreview !== false) {
                 var sideLink = t.closest('.side-nav-card__link, [data-test-selector="followed-channel"], [data-a-target="side-nav-card"]');
                 if (sideLink) {
+                    var sideCardRoot = (sideLink.closest && sideLink.closest('.side-nav-card, [data-test-selector="followed-channel"], [data-a-target="side-nav-card"]')) || sideLink;
+                    var isBlockedSideCat = Boolean(
+                        (sideCardRoot.classList && sideCardRoot.classList.contains('tp9-blocked-category-hidden')) ||
+                        (typeof isSidebarCardBlockedByCategory === 'function' && isSidebarCardBlockedByCategory(sideCardRoot))
+                    );
                     var isOffline = isSidebarCardOffline(sideLink);
                     var href = sideLink.getAttribute('href') || (sideLink.querySelector('a') && sideLink.querySelector('a').getAttribute('href')) || '';
                     var m = href.match(/^\/([a-zA-Z0-9_]{2,30})$/);
-                    if (m && !isOffline) {
+                    if (m && !isOffline && !isBlockedSideCat) {
                         var login = m[1].toLowerCase();
                         if (!bttvSidebarCard) {
                             bttvSidebarCard = document.createElement('div');
@@ -54505,8 +55230,15 @@ dashboardButton.style.visibility = 'hidden';
                             if (vidEl) {
                                 vidEl.style.opacity = '0';
                             }
-                            var gameEl = sideLink.querySelector('[data-a-target="side-nav-game-title"]');
-                            var gameTxt = gameEl ? (' · ' + (gameEl.textContent || '').trim()) : '';
+                            var sideCatInfo = typeof extractSidebarCardCategory === 'function'
+                                ? extractSidebarCardCategory(sideCardRoot)
+                                : null;
+                            var gameNamePreview = (sideCatInfo && sideCatInfo.name) || '';
+                            if (!gameNamePreview) {
+                                var gameEl = sideLink.querySelector('[data-a-target="side-nav-game-title"], [data-a-target="side-nav-card-metadata"] p, .side-nav-card__metadata p');
+                                gameNamePreview = gameEl ? (gameEl.getAttribute('title') || gameEl.textContent || '').trim() : '';
+                            }
+                            var gameTxt = gameNamePreview ? (' · ' + gameNamePreview) : '';
                             bttvSidebarCard.querySelector('.tp9-sp-info').textContent = '🔴 ' + m[1] + gameTxt;
 
                             if (bttvSidebarIframeTimer) clearTimeout(bttvSidebarIframeTimer);
@@ -56040,11 +56772,16 @@ dashboardButton.style.visibility = 'hidden';
         ensureChatInputSlowModeObserver();
         syncAnonChatBadge();
 
-        // 0. Déplier automatiquement la barre latérale des chaînes suivies (« Afficher plus »)
+        // 0. Déplier automatiquement la barre latérale des chaînes suivies (« Afficher plus ») et les chaînes live de l'accueil
         if (pageConfig.autoExpandSidebar) {
             expandFollowedSidebarStep();
         }
+        if (pageConfig.autoExpandHomeLive) {
+            expandHomeRecommendedLiveShelf(false);
+        }
         sweepOfflineSidebarChannels();
+        sweepSidebarForYouSection();
+        sweepSidebarLunaSection();
 
         // 1. Réclamation et suivi automatique des coffres de points de chaîne (+50 pts / multiplicateur sub / gains +10/+20)
         ensureBonusPointsObserver();
@@ -56122,6 +56859,10 @@ dashboardButton.style.visibility = 'hidden';
 
         // 4. Contrôle de la lecture automatique (Accueil, Chaînes hors ligne, VOD recommandées)
         enforceAutoplayPolicies(false);
+
+        // 5. Masquage des catégories choisies et des streamers qui les diffusent
+        sweepBlockedCategories();
+        sweepSidebarRedundantShowMoreButtons();
     }
 
     function syncBttvFeatures() {
@@ -56154,59 +56895,124 @@ dashboardButton.style.visibility = 'hidden';
         sweepChatPromoCarousel();
         sweepChatTopBanners();
         ensureChatBannerObserver();
+        syncBlockedCategoriesState();
     }
 
     var bttvSidebarExpandTimer = null;
     var bttvSidebarLastCardCount = 0;
     var bttvSidebarStagnantCount = 0;
 
+    var SIDEBAR_ALL_SECTION_HEADINGS_RE = /^(pour\s+vous|for\s+you|cha[îi]nes\s+suivies|followed\s+channels|jouer\s+sur\s+luna|play\s+on\s+luna|amazon\s+luna|cha[îi]nes\s+live|cha[îi]nes\s+en\s+live|live\s+channels|cha[îi]nes\s+recommand[ée]es|recommended\s+channels|cat[ée]gories\s+recommand[ée]es|recommended\s+categories|les\s+spectateurs\s+regardent\s+aussi|viewers\s+also\s+watch)$/i;
+    var SIDEBAR_SHOW_TOGGLE_RE = /\b(afficher\s+plus|afficher\s+moins|voir\s+plus|voir\s+moins|show\s+more|show\s+less|load\s+more|fewer)\b/i;
+
+    // Découpe précisément une section de la barre latérale gauche par ordre du DOM entre son titre
+    // et le titre de la section suivante (indépendant des conteneurs <nav aria-label="Pour vous"> de Twitch).
+    function collectSidebarSectionSlice(sideNav, targetHeadingRe) {
+        if (!sideNav || !sideNav.querySelectorAll) return null;
+        var raw = sideNav.querySelectorAll('h1, h2, h3, h4, h5, p, span');
+        var sectionHeadings = [];
+        for (var i = 0; i < raw.length; i++) {
+            var n = raw[i];
+            if (!n || (n.children && n.children.length > 0)) continue;
+            if (n.closest && n.closest('button, a, .side-nav-card, [data-test-selector="followed-channel"], [data-a-target="side-nav-card"]')) {
+                continue;
+            }
+            var txt = (n.textContent || '').trim();
+            if (txt && txt.length <= 55 && SIDEBAR_ALL_SECTION_HEADINGS_RE.test(txt)) {
+                sectionHeadings.push({ el: n, text: txt });
+            }
+        }
+
+        var startIdx = -1;
+        for (var s = 0; s < sectionHeadings.length; s++) {
+            if (targetHeadingRe.test(sectionHeadings[s].text)) {
+                startIdx = s;
+                break;
+            }
+        }
+        if (startIdx === -1) return null;
+
+        var startHeading = sectionHeadings[startIdx].el;
+        var endHeading = (startIdx + 1 < sectionHeadings.length) ? sectionHeadings[startIdx + 1].el : null;
+
+        function inRange(node) {
+            if (!node || node === startHeading || (node.contains && node.contains(startHeading))) return false;
+            if (endHeading && (node === endHeading || (node.contains && node.contains(endHeading)))) return false;
+            if (typeof startHeading.compareDocumentPosition === 'function' && typeof Node !== 'undefined') {
+                if (!(startHeading.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+                    return false;
+                }
+                if (endHeading && !(node.compareDocumentPosition(endHeading) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+                    return false;
+                }
+                return true;
+            }
+            return false;
+        }
+
+        return {
+            startHeading: startHeading,
+            endHeading: endHeading,
+            inRange: inRange
+        };
+    }
+
+    function getFollowedSectionCards(sideNav) {
+        if (!sideNav || !sideNav.querySelectorAll) return [];
+        var slice = collectSidebarSectionSlice(sideNav, /^(cha[îi]nes\s+suivies|followed\s+channels)$/i);
+        var all = sideNav.querySelectorAll('.side-nav-card, [data-test-selector="followed-channel"], [data-a-target="side-nav-card"]');
+        var out = [];
+        var seen = new Set();
+        for (var i = 0; i < all.length; i++) {
+            var rawCard = all[i];
+            var card = (rawCard.closest && rawCard.closest('.side-nav-card, [data-test-selector="followed-channel"]')) || rawCard;
+            if (seen.has(card)) continue;
+            if (slice && !slice.inRange(card)) continue;
+            seen.add(card);
+            out.push(card);
+        }
+        return out;
+    }
+
     function getFollowedSectionRoot() {
         var sideNav = document.querySelector('[data-a-target="side-nav-bar"], .side-nav, #side-nav');
         if (!sideNav) return null;
-        var followed = sideNav.querySelector(
-            '[aria-label*="Chaînes suivies" i], ' +
-            '[aria-label*="Followed" i], ' +
-            '[data-a-target="side-nav-header-expanded"]'
-        );
-        if (followed && !followed.classList.contains('side-nav-section')) {
-            followed = followed.closest('.side-nav-section') || followed.parentElement;
-        }
-        return followed || sideNav;
+        var sec = sideNav.querySelector('.side-nav-section[aria-label*="Chaînes suivies" i], .side-nav-section[aria-label*="Followed" i]');
+        return sec || sideNav;
     }
 
     function findSidebarShowMoreOrLessButton(wantLess) {
         var sideNav = document.querySelector('[data-a-target="side-nav-bar"], .side-nav, #side-nav');
         if (!sideNav) return null;
 
-        var searchRoot = getFollowedSectionRoot() || sideNav;
+        var followedSlice = collectSidebarSectionSlice(sideNav, /^(cha[îi]nes\s+suivies|followed\s+channels)$/i);
         var targetAttr = wantLess
             ? '[data-a-target="side-nav-show-less-button"], [data-test-selector="ShowLess"]'
             : '[data-a-target="side-nav-show-more-button"], [data-test-selector="ShowMore"]';
 
         var candidates = Array.prototype.slice.call(
-            searchRoot.querySelectorAll(targetAttr + ', .side-nav-show-more-toggle__button button, button')
+            sideNav.querySelectorAll(targetAttr + ', .side-nav-show-more-toggle__button button, button')
         );
-        if (searchRoot !== sideNav && candidates.length === 0) {
-            candidates = Array.prototype.slice.call(
-                sideNav.querySelectorAll(targetAttr + ', .side-nav-show-more-toggle__button button, button')
-            );
-        }
 
         var textRegex = wantLess
-            ? /afficher moins|voir moins|show less|fewer/i
-            : /afficher plus|voir plus|show more|load more/i;
+            ? /\b(afficher\s+moins|voir\s+moins|show\s+less|fewer)\b/i
+            : /\b(afficher\s+plus|voir\s+plus|show\s+more|load\s+more)\b/i;
 
         for (var i = 0; i < candidates.length; i++) {
             var el = candidates[i];
             var btn = el.tagName === 'BUTTON' ? el : (el.querySelector('button') || el.closest('button') || el);
             if (!btn || btn.disabled) continue;
 
-            var sec = btn.closest('.side-nav-section, [aria-label]');
-            if (sec && sec !== sideNav) {
-                var secHeader = sec.querySelector('h2, h3, h4, h5');
-                var secLabel = ((sec.getAttribute('aria-label') || '') + ' ' + (secHeader ? secHeader.textContent : '')).toLowerCase();
-                if (/recommand|recommend|regardent aussi|also watch|chaînes en live|live channels|catégories|categories/.test(secLabel)) {
-                    continue;
+            if (followedSlice) {
+                if (!followedSlice.inRange(btn)) continue;
+            } else {
+                var sec = btn.closest('.side-nav-section');
+                if (sec && sec !== sideNav) {
+                    var secHeader = sec.querySelector('h2, h3, h4, h5');
+                    var secLabel = ((sec.getAttribute('aria-label') || '') + ' ' + (secHeader ? secHeader.textContent : '')).toLowerCase();
+                    if (/pour vous|for you|stories|luna|recommand|recommend|regardent aussi|also watch|chaînes en live|live channels|catégories|categories/.test(secLabel)) {
+                        continue;
+                    }
                 }
             }
 
@@ -56221,7 +57027,7 @@ dashboardButton.style.visibility = 'hidden';
                     return btn;
                 }
             } else {
-                if (dt.indexOf('show-more') !== -1 || (textRegex.test(label) && !/moins|less/i.test(label))) {
+                if (dt.indexOf('show-more') !== -1 || (textRegex.test(label) && !/\b(moins|less)\b/i.test(label))) {
                     return btn;
                 }
             }
@@ -56292,12 +57098,1746 @@ dashboardButton.style.visibility = 'hidden';
         }
     }
 
+    var bttvHadForYouMarks = false;
+
+    function clearSidebarForYouDomMarks() {
+        if (!bttvHadForYouMarks || typeof document === 'undefined' || !document.querySelectorAll) return;
+        var hiddenNodes = document.querySelectorAll('.tp9-foryou-hidden');
+        for (var i = 0; i < hiddenNodes.length; i++) {
+            hiddenNodes[i].classList.remove('tp9-foryou-hidden');
+        }
+        var compactBars = document.querySelectorAll('.tp9-foryou-topbar-compact');
+        for (var j = 0; j < compactBars.length; j++) {
+            compactBars[j].classList.remove('tp9-foryou-topbar-compact');
+        }
+        bttvHadForYouMarks = false;
+    }
+
+    // Masque la section « Pour vous » (en-tête + Ouvrir les stories + Protégez votre série + son bouton Afficher plus)
+    // tout en préservant à 100 % la flèche de repli de la barre latérale (<-|) et le conteneur scrollable des chaînes suivies
+    // (attention : Twitch place aria-label="Pour vous" sur le <nav>/conteneur scrollable entier de la barre latérale !).
+    function sweepSidebarForYouSection() {
+        if (typeof document === 'undefined' || !document.querySelector) return;
+        clearSidebarForYouDomMarks();
+        if (scriptIsOff() || !pageConfig.hideForYou) {
+            return;
+        }
+        var sideNav = document.querySelector('[data-a-target="side-nav-bar"], #side-nav, .side-nav, nav[aria-label*="latérale" i], nav[aria-label*="Side" i]');
+        if (!sideNav || !sideNav.querySelectorAll) return;
+
+        var collapseBtn = sideNav.querySelector(
+            '[data-a-target="side-nav-arrow"], ' +
+            'button[aria-label*="Replier" i], button[aria-label*="Collapse" i], ' +
+            'button[aria-label*="Développer" i], button[aria-label*="Expand" i]'
+        );
+
+        var followedAnchor = null;
+        var headingCandidates = sideNav.querySelectorAll('h1, h2, h3, h4, h5, p, span, [data-a-target="followed-channels-header"]');
+        for (var fh = 0; fh < headingCandidates.length; fh++) {
+            var hc = headingCandidates[fh];
+            if (hc.children && hc.children.length > 2) continue;
+            var fhTxt = (hc.textContent || '').trim();
+            if (/^(chaînes\s+suivies|chaines\s+suivies|followed\s+channels)$/i.test(fhTxt)) {
+                followedAnchor = hc;
+                break;
+            }
+        }
+        if (!followedAnchor) {
+            followedAnchor = sideNav.querySelector('[data-test-selector="followed-channel"], .side-nav-card, [data-a-target="side-nav-card"]');
+        }
+
+        function isScrollOrMultiSectionWrapper(el) {
+            if (!el || el === sideNav || el === document.body) return true;
+            var cls = typeof el.className === 'string' ? el.className : '';
+            if (/scroller|simplebar|side-nav__overlay|side-nav-contents/i.test(cls)) return true;
+            var dt = (el.getAttribute && el.getAttribute('data-a-target')) || '';
+            if (/scroller|side-nav-bar/i.test(dt)) return true;
+            if (el.tagName === 'NAV' || (el.getAttribute && el.getAttribute('role') === 'navigation')) return true;
+            if (collapseBtn && (el === collapseBtn || (el.contains && el.contains(collapseBtn)))) return true;
+            if (followedAnchor && (el === followedAnchor || (el.contains && el.contains(followedAnchor)) || (followedAnchor.contains && followedAnchor.contains(el)))) {
+                return true;
+            }
+            if (el.querySelector && el.querySelector('.side-nav-card, [data-test-selector="followed-channel"], [data-a-target="side-nav-card"], a[href^="/"]')) {
+                return true;
+            }
+            if (el.getBoundingClientRect) {
+                var r = el.getBoundingClientRect();
+                if (r.height > 260) return true;
+            }
+            return false;
+        }
+
+        function precedesFollowedSection(el) {
+            if (!followedAnchor || !el) return false;
+            if (el === followedAnchor || (el.contains && el.contains(followedAnchor)) || (followedAnchor.contains && followedAnchor.contains(el))) {
+                return false;
+            }
+            if (typeof el.compareDocumentPosition === 'function' && typeof Node !== 'undefined') {
+                return Boolean(el.compareDocumentPosition(followedAnchor) & Node.DOCUMENT_POSITION_FOLLOWING);
+            }
+            return false;
+        }
+
+        function climbSafeStoryItemBox(node, maxHeightPx) {
+            if (!node || isScrollOrMultiSectionWrapper(node)) return null;
+            var limitH = maxHeightPx || 220;
+            var cur = node;
+            var guard = 0;
+            while (
+                cur.parentElement &&
+                cur.parentElement !== sideNav &&
+                !isScrollOrMultiSectionWrapper(cur.parentElement) &&
+                (!followedAnchor || precedesFollowedSection(cur.parentElement)) &&
+                guard++ < 8
+            ) {
+                if (cur.parentElement.getBoundingClientRect) {
+                    var pr = cur.parentElement.getBoundingClientRect();
+                    if (pr.height > limitH) break;
+                }
+                cur = cur.parentElement;
+            }
+            cur.classList.add('tp9-foryou-hidden');
+            bttvHadForYouMarks = true;
+            return cur;
+        }
+
+        var hidAnyStoryOrStreak = false;
+        var nodes = sideNav.querySelectorAll('h1, h2, h3, h4, h5, p, span, button, a, div');
+        for (var i = 0; i < nodes.length; i++) {
+            var el = nodes[i];
+            if (!el || (el.classList && el.classList.contains('tp9-foryou-hidden'))) continue;
+            if (el.closest && el.closest('.tp9-foryou-hidden')) continue;
+            if (collapseBtn && (el === collapseBtn || (el.contains && el.contains(collapseBtn)))) continue;
+
+            // A. En-tête texte « Pour vous » / « For You » uniquement sur l'élément feuille du titre (ne jamais masquer <nav aria-label="Pour vous"> !)
+            if ((!el.children || el.children.length === 0) && el.tagName !== 'NAV') {
+                var leafTxt = (el.textContent || '').trim();
+                if (/^(pour\s+vous|for\s+you)$/i.test(leafTxt)) {
+                    if (!followedAnchor || precedesFollowedSection(el)) {
+                        var titleTarget = el;
+                        while (
+                            titleTarget.parentElement &&
+                            titleTarget.parentElement !== sideNav &&
+                            titleTarget.parentElement.children &&
+                            titleTarget.parentElement.children.length === 1 &&
+                            !isScrollOrMultiSectionWrapper(titleTarget.parentElement)
+                        ) {
+                            var tr = titleTarget.parentElement.getBoundingClientRect ? titleTarget.parentElement.getBoundingClientRect() : { height: 24 };
+                            if (tr.height > 56) break;
+                            titleTarget = titleTarget.parentElement;
+                        }
+                        titleTarget.classList.add('tp9-foryou-hidden');
+                        bttvHadForYouMarks = true;
+                        var topRow = titleTarget.parentElement;
+                        if (
+                            topRow &&
+                            collapseBtn &&
+                            topRow.contains &&
+                            topRow.contains(collapseBtn) &&
+                            (!followedAnchor || !topRow.contains(followedAnchor))
+                        ) {
+                            var topRowRect = topRow.getBoundingClientRect ? topRow.getBoundingClientRect() : { height: 40 };
+                            if (topRowRect.height <= 64) {
+                                topRow.classList.add('tp9-foryou-topbar-compact');
+                                bttvHadForYouMarks = true;
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
+
+            // B. Bouton / ligne « Ouvrir les stories » (mode déplié ou icône barre repliée)
+            var elAria = ((el.getAttribute && el.getAttribute('aria-label')) || '').trim();
+            var elDt = ((el.getAttribute && el.getAttribute('data-a-target')) || '').trim();
+            if (
+                ((el.tagName === 'BUTTON' || el.tagName === 'A') && /\bstories\b/i.test(elAria + ' ' + elDt)) ||
+                ((!el.children || el.children.length === 0) && /^(ouvrir\s+les\s+stories|open\s+stories|cr[ée]er\s+une\s+story)$/i.test((el.textContent || '').trim()))
+            ) {
+                if (!followedAnchor || precedesFollowedSection(el)) {
+                    if (climbSafeStoryItemBox(el, 220)) {
+                        hidAnyStoryOrStreak = true;
+                    }
+                }
+                continue;
+            }
+
+            // C. Ligne « Protégez votre série » au-dessus de « Chaînes suivies »
+            if ((!el.children || el.children.length === 0) && /^(prot[ée]gez\s+votre\s+s[ée]rie|protect\s+your\s+streak)$/i.test((el.textContent || '').trim())) {
+                if (!followedAnchor || precedesFollowedSection(el)) {
+                    if (climbSafeStoryItemBox(el, 220)) {
+                        hidAnyStoryOrStreak = true;
+                    }
+                }
+                continue;
+            }
+        }
+
+        // D. Bouton « Afficher plus » propre à la section « Pour vous » (strictement au-dessus de « Chaînes suivies »)
+        if (followedAnchor && hidAnyStoryOrStreak) {
+            var sideBtns = sideNav.querySelectorAll('button');
+            for (var sb = 0; sb < sideBtns.length; sb++) {
+                var btn = sideBtns[sb];
+                if (!btn || btn === collapseBtn || (btn.closest && btn.closest('.tp9-foryou-hidden'))) continue;
+                if (!precedesFollowedSection(btn)) continue;
+                var bLabel = ((btn.textContent || '') + ' ' + (btn.getAttribute('aria-label') || '')).trim();
+                if (SIDEBAR_SHOW_TOGGLE_RE.test(bLabel)) {
+                    climbSafeStoryItemBox(btn, 70);
+                }
+            }
+        }
+    }
+
+    var bttvHadLunaMarks = false;
+
+    function clearSidebarLunaDomMarks() {
+        if (!bttvHadLunaMarks || typeof document === 'undefined' || !document.querySelectorAll) return;
+        var prev = document.querySelectorAll('.tp9-luna-hidden');
+        for (var i = 0; i < prev.length; i++) {
+            prev[i].classList.remove('tp9-luna-hidden');
+        }
+        bttvHadLunaMarks = false;
+    }
+
+    // Masque intégralement la section « Jouer sur Luna » / « Play on Luna » à gauche
+    // (en-tête + liste de jeux Amazon Luna + son propre bouton « Afficher plus », en mode déplié ou icônes)
+    // sans jamais affecter le conteneur scrollable, « Chaînes suivies », « Chaînes live », ni un streamer nommé Luna.
+    function sweepSidebarLunaSection() {
+        if (typeof document === 'undefined' || !document.querySelector) return;
+        clearSidebarLunaDomMarks();
+        if (scriptIsOff() || !pageConfig.hideLuna) {
+            return;
+        }
+        var sideNav = document.querySelector('[data-a-target="side-nav-bar"], #side-nav, .side-nav, nav[aria-label*="latérale" i], nav[aria-label*="Side" i]');
+        if (!sideNav || !sideNav.querySelectorAll) return;
+
+        var collapseBtn = sideNav.querySelector(
+            '[data-a-target="side-nav-arrow"], ' +
+            'button[aria-label*="Replier" i], button[aria-label*="Collapse" i], ' +
+            'button[aria-label*="Développer" i], button[aria-label*="Expand" i]'
+        );
+
+        var OTHER_SECTION_TEXT_RE = /pour\s+vous|for\s+you|cha[îi]nes\s+suivies|followed\s+channels|cha[îi]nes\s+live|cha[îi]nes\s+en\s+live|live\s+channels|cha[îi]nes\s+recommand|recommended\s+channels|cat[ée]gories\s+recommand|recommended\s+categories|regardent\s+aussi|also\s+watch|ouvrir\s+les\s+stories|open\s+stories/i;
+        var LUNA_HEADING_RE = /^(jouer\s+sur\s+luna|play\s+on\s+luna|amazon\s+luna)$/i;
+
+        function hasTwitchChannelContent(container) {
+            if (!container || !container.querySelectorAll) return false;
+            if (container.querySelector('[data-test-selector="followed-channel"], .tw-channel-status-indicator, [data-a-target="side-nav-live-status"], .side-nav-card__avatar--offline')) {
+                return true;
+            }
+            var links = container.querySelectorAll('a[href]');
+            for (var i = 0; i < links.length; i++) {
+                var href = (links[i].getAttribute('href') || '').trim();
+                // Une carte de streamer Twitch a un chemin mono-segment "/pseudo" (ex: "/twiks", "/luna_tv")
+                var slugPart = href.replace(/\//g, '').toLowerCase();
+                if (/^\/[a-zA-Z0-9_]+\/?$/.test(href) && (typeof NON_CHANNEL_PATHS === 'undefined' || NON_CHANNEL_PATHS.indexOf(slugPart) === -1)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        function hasOtherSidebarSectionHeading(container) {
+            if (!container) return false;
+            var cls = typeof container.className === 'string' ? container.className : '';
+            if (/scroller|simplebar|side-nav__overlay|side-nav-contents/i.test(cls)) return true;
+            if (container.tagName === 'NAV' || (container.getAttribute && container.getAttribute('role') === 'navigation')) return true;
+            var aria = ((container.getAttribute && container.getAttribute('aria-label')) || '').trim();
+            if (aria && OTHER_SECTION_TEXT_RE.test(aria)) return true;
+            if (!container.querySelectorAll) return false;
+            var nodes = container.querySelectorAll('h1, h2, h3, h4, h5, p, span, [aria-label]');
+            for (var i = 0; i < nodes.length; i++) {
+                var n = nodes[i];
+                var nAria = ((n.getAttribute && n.getAttribute('aria-label')) || '').trim();
+                if (nAria && OTHER_SECTION_TEXT_RE.test(nAria)) return true;
+                if ((!n.children || n.children.length <= 2) && n.textContent) {
+                    var t = n.textContent.trim();
+                    if (t && t.length <= 60 && OTHER_SECTION_TEXT_RE.test(t)) return true;
+                }
+            }
+            return false;
+        }
+
+        function isProtectedFromLunaHide(el) {
+            if (!el || el === sideNav || el === document.body) return true;
+            if (collapseBtn && (el === collapseBtn || (el.contains && el.contains(collapseBtn)))) return true;
+            if (hasTwitchChannelContent(el)) return true;
+            if (hasOtherSidebarSectionHeading(el)) return true;
+            return false;
+        }
+
+        function climbAndMarkLunaBox(node, maxHeightPx) {
+            if (!node || isProtectedFromLunaHide(node)) return null;
+            var cur = node;
+            var guard = 0;
+            while (
+                cur.parentElement &&
+                cur.parentElement !== sideNav &&
+                !isProtectedFromLunaHide(cur.parentElement) &&
+                guard++ < 10
+            ) {
+                if (maxHeightPx && cur.parentElement.getBoundingClientRect) {
+                    var pr = cur.parentElement.getBoundingClientRect();
+                    if (pr.height > maxHeightPx) break;
+                }
+                cur = cur.parentElement;
+            }
+            cur.classList.add('tp9-luna-hidden');
+            bttvHadLunaMarks = true;
+            return cur;
+        }
+
+        // 1. Découpe exacte par position DOM entre le titre « Jouer sur Luna » et la section suivante (« Chaînes live », etc.) :
+        //    garantit le masquage à 100 % du bouton « Afficher plus » de Luna même avec des spans cachés ScVisuallyHidden !
+        var lunaSlice = collectSidebarSectionSlice(sideNav, LUNA_HEADING_RE);
+        if (lunaSlice) {
+            climbAndMarkLunaBox(lunaSlice.startHeading, 80);
+            var sliceNodes = sideNav.querySelectorAll('a, button, .side-nav-card, [data-a-target="side-nav-card"], .side-nav-show-more-toggle__button');
+            for (var sn = 0; sn < sliceNodes.length; sn++) {
+                var sNode = sliceNodes[sn];
+                if (!sNode || (sNode.closest && sNode.closest('.tp9-luna-hidden'))) continue;
+                if (lunaSlice.inRange(sNode)) {
+                    climbAndMarkLunaBox(sNode, 420);
+                }
+            }
+        }
+
+        // 2. Couvre aussi la barre latérale repliée en icônes 50px (sans titre h2/h3 visible) via les liens/attributs Amazon Luna :
+        var candidates = sideNav.querySelectorAll('a[href*="luna.amazon." i], [data-a-target*="luna" i], [data-test-selector*="luna" i], [aria-label]');
+        for (var i = 0; i < candidates.length; i++) {
+            var el = candidates[i];
+            if (!el || (el.closest && el.closest('.tp9-luna-hidden'))) continue;
+            var href = (el.getAttribute && el.getAttribute('href')) || '';
+            var aria = ((el.getAttribute && el.getAttribute('aria-label')) || '').trim();
+            var dt = ((el.getAttribute && el.getAttribute('data-a-target')) || '') + ' ' +
+                ((el.getAttribute && el.getAttribute('data-test-selector')) || '');
+            if (
+                /luna\.amazon\./i.test(href) ||
+                /\bluna\b/i.test(dt) ||
+                (el.tagName !== 'NAV' && LUNA_HEADING_RE.test(aria))
+            ) {
+                climbAndMarkLunaBox(el, 420);
+            }
+        }
+    }
+
+    var bttvHadSidebarToggleMarks = false;
+    var bttvFollowedTopUpLastAt = 0;
+    var bttvFollowedTopUpLastTotal = 0;
+    var bttvFollowedTopUpStagnant = 0;
+
+    function clearSidebarToggleMarks() {
+        if (!bttvHadSidebarToggleMarks || typeof document === 'undefined' || !document.querySelectorAll) return;
+        var prev = document.querySelectorAll('.tp9-sidebar-toggle-hidden');
+        for (var i = 0; i < prev.length; i++) {
+            prev[i].classList.remove('tp9-sidebar-toggle-hidden');
+        }
+        bttvHadSidebarToggleMarks = false;
+    }
+
+    // Masque les boutons « Afficher plus » / « Afficher moins » devenus inutiles sur les listes de streamers à gauche
+    // lorsque des chaînes ont été masquées (catégories bloquées comme GTA VI ou chaînes hors ligne) et qu'il n'y a plus
+    // aucun live visible supplémentaire à charger ni plus de 10 chaînes visibles à replier.
+    function sweepSidebarRedundantShowMoreButtons() {
+        if (typeof document === 'undefined' || !document.querySelector) return;
+        clearSidebarToggleMarks();
+        if (scriptIsOff()) return;
+
+        var hasCategoryFilter = Boolean(
+            pageConfig.hideCategories !== false &&
+            (bttvBlockedCatNormSet.size > 0 || bttvBlockedCatSlugSet.size > 0)
+        );
+        if (!pageConfig.autoExpandSidebar && !pageConfig.hideOfflineChannels && !hasCategoryFilter) {
+            return;
+        }
+
+        var sideNav = document.querySelector('[data-a-target="side-nav-bar"], #side-nav, .side-nav, nav[aria-label*="latérale" i], nav[aria-label*="Side" i]');
+        if (!sideNav || !sideNav.querySelectorAll) return;
+
+        function hideToggleButtonCleanly(btn, keepSiblingBtn) {
+            if (!btn) return;
+            var target = btn;
+            var guard = 0;
+            while (
+                target.parentElement &&
+                target.parentElement !== sideNav &&
+                guard++ < 5
+            ) {
+                var p = target.parentElement;
+                if (keepSiblingBtn && p.contains && p.contains(keepSiblingBtn)) break;
+                if (p.querySelector && p.querySelector('.side-nav-card, [data-test-selector="followed-channel"], [data-a-target="side-nav-card"], h1, h2, h3')) {
+                    break;
+                }
+                var pr = p.getBoundingClientRect ? p.getBoundingClientRect() : { height: 30 };
+                if (pr.height > 65) break;
+                target = p;
+            }
+            target.classList.add('tp9-sidebar-toggle-hidden');
+            bttvHadSidebarToggleMarks = true;
+        }
+
+        function processChannelSection(sectionRegex, isFollowedSection) {
+            var slice = collectSidebarSectionSlice(sideNav, sectionRegex);
+            if (!slice) return;
+
+            var allCards = sideNav.querySelectorAll('.side-nav-card, [data-test-selector="followed-channel"], [data-a-target="side-nav-card"]');
+            var seen = new Set();
+            var totalCards = 0;
+            var offlineCards = 0;
+            var hiddenCards = 0;
+
+            for (var i = 0; i < allCards.length; i++) {
+                var rawCard = allCards[i];
+                var card = (rawCard.closest && rawCard.closest('.side-nav-card, [data-test-selector="followed-channel"]')) || rawCard;
+                if (seen.has(card) || !slice.inRange(card)) continue;
+                seen.add(card);
+                totalCards++;
+
+                var isOff = isSidebarCardOffline(card);
+                if (isOff) offlineCards++;
+
+                var isHidden = Boolean(
+                    (card.classList && (card.classList.contains('tp9-offline-channel-hidden') || card.classList.contains('tp9-blocked-category-hidden'))) ||
+                    (card.closest && card.closest('.tp9-offline-channel-hidden, .tp9-blocked-category-hidden'))
+                );
+                if (isHidden) hiddenCards++;
+            }
+
+            var visibleCards = totalCards - hiddenCards;
+            var showMoreBtn = null;
+            var showLessBtn = null;
+
+            var btns = sideNav.querySelectorAll('button');
+            for (var b = 0; b < btns.length; b++) {
+                var btn = btns[b];
+                if (!btn || !slice.inRange(btn)) continue;
+                if (btn.closest && btn.closest('.side-nav-card, [data-test-selector="followed-channel"], .tp9-luna-hidden, .tp9-foryou-hidden')) continue;
+                var dt = (btn.getAttribute('data-a-target') || '').toLowerCase();
+                var lbl = ((btn.textContent || '') + ' ' + (btn.getAttribute('aria-label') || '')).trim();
+                if (dt.indexOf('show-less') !== -1 || /\b(afficher\s+moins|voir\s+moins|show\s+less|fewer)\b/i.test(lbl)) {
+                    if (!showLessBtn) showLessBtn = btn;
+                } else if (dt.indexOf('show-more') !== -1 || (/\b(afficher\s+plus|voir\s+plus|show\s+more|load\s+more)\b/i.test(lbl) && !/\b(moins|less)\b/i.test(lbl))) {
+                    if (!showMoreBtn) showMoreBtn = btn;
+                }
+            }
+
+            if (!showMoreBtn && !showLessBtn) return;
+
+            if (isFollowedSection) {
+                // Si des streamers suivis ont été masqués (ex: GTA VI) et qu'il reste moins de 10 lives visibles
+                // alors qu'aucune chaîne hors ligne n'est encore atteinte, on clique une fois sur « Afficher plus »
+                // pour faire remonter les éventuels autres streamers suivis en live restés sous le seuil des 10 :
+                if (
+                    showMoreBtn &&
+                    hiddenCards > 0 &&
+                    visibleCards < 10 &&
+                    !(pageConfig.hideOfflineChannels && offlineCards > 0)
+                ) {
+                    var now = Date.now();
+                    if (totalCards !== bttvFollowedTopUpLastTotal) {
+                        bttvFollowedTopUpLastTotal = totalCards;
+                        bttvFollowedTopUpStagnant = 0;
+                    }
+                    if (bttvFollowedTopUpStagnant < 2 && (now - bttvFollowedTopUpLastAt) > 850) {
+                        bttvFollowedTopUpLastAt = now;
+                        bttvFollowedTopUpStagnant++;
+                        try { showMoreBtn.click(); } catch (e) {}
+                        return;
+                    }
+                } else if (totalCards !== bttvFollowedTopUpLastTotal) {
+                    bttvFollowedTopUpLastTotal = totalCards;
+                    bttvFollowedTopUpStagnant = 0;
+                }
+
+                var hideMore = Boolean(
+                    (pageConfig.hideOfflineChannels && offlineCards > 0) ||
+                    bttvFollowedTopUpStagnant >= 2 ||
+                    (pageConfig.autoExpandSidebar && bttvSidebarStagnantCount > 2)
+                );
+                var hideLess = Boolean(
+                    pageConfig.autoExpandSidebar ||
+                    (hiddenCards > 0 && visibleCards <= 10)
+                );
+
+                if (hideMore && hideLess) {
+                    hideToggleButtonCleanly(showMoreBtn || showLessBtn, null);
+                    if (showLessBtn && showMoreBtn) hideToggleButtonCleanly(showLessBtn, null);
+                } else if (hideMore && showMoreBtn) {
+                    hideToggleButtonCleanly(showMoreBtn, showLessBtn);
+                } else if (hideLess && showLessBtn) {
+                    hideToggleButtonCleanly(showLessBtn, showMoreBtn);
+                }
+            } else {
+                // Section « Chaînes live » / « Chaînes recommandées » : masque « Afficher moins » s'il y a <= 10 chaînes visibles
+                if (showLessBtn && hiddenCards > 0 && visibleCards <= 10) {
+                    hideToggleButtonCleanly(showLessBtn, showMoreBtn);
+                }
+            }
+        }
+
+        processChannelSection(/^(cha[îi]nes\s+suivies|followed\s+channels)$/i, true);
+        processChannelSection(/^(cha[îi]nes\s+live|cha[îi]nes\s+en\s+live|live\s+channels|cha[îi]nes\s+recommand[ée]es|recommended\s+channels)$/i, false);
+    }
+
+    var bttvHomeLiveExpandTimer = null;
+    var bttvHomeLiveExpandLastAt = 0;
+    var bttvHomeLiveExpandClicks = 0;
+    var bttvHomeLiveLastCardCount = 0;
+    var bttvHomeLiveStagnantCount = 0;
+
+    function isHomeLiveRecommendedHeadingText(txt) {
+        var norm = normalizeCategoryKey(txt || '');
+        if (!norm) return false;
+        return (
+            norm.indexOf('chaines live qui pourraient vous plaire') !== -1 ||
+            norm.indexOf('live channels we think you') !== -1 ||
+            norm.indexOf('live channels you may like') !== -1
+        );
+    }
+
+    function expandHomeRecommendedLiveShelf(forceImmediate) {
+        if (typeof document === 'undefined' || !document.querySelector) return false;
+        var pathNow = (typeof location !== 'undefined' && location.pathname) || '/';
+        if (pathNow !== '/' && pathNow !== '') {
+            bttvHomeLiveExpandClicks = 0;
+            bttvHomeLiveLastCardCount = 0;
+            bttvHomeLiveStagnantCount = 0;
+            return false;
+        }
+        if (scriptIsOff() || !pageConfig.autoExpandHomeLive) return false;
+        var now = Date.now();
+        if (!forceImmediate && (now - bttvHomeLiveExpandLastAt) < 900) {
+            return false;
+        }
+        if (bttvHomeLiveExpandClicks >= 6) {
+            return false;
+        }
+        var mainEl = document.querySelector('main');
+        if (!mainEl || !mainEl.querySelectorAll) return false;
+
+        var headings = mainEl.querySelectorAll('h1, h2, h3, [role="heading"]');
+        var targetHeading = null;
+        for (var h = 0; h < headings.length; h++) {
+            var hd = headings[h];
+            if (!hd || (hd.closest && hd.closest('article, [class*="preview-card"], [data-a-target*="preview-card"]'))) continue;
+            if (isHomeLiveRecommendedHeadingText(hd.textContent || '')) {
+                targetHeading = hd;
+                break;
+            }
+        }
+        if (!targetHeading) return false;
+
+        // Remonte jusqu'au conteneur de la rangée « Chaînes live qui pourraient vous plaire »
+        // sans jamais englober une autre section (h2/h3 distinct) de la page d'accueil.
+        var shelfScope = targetHeading;
+        var guard = 0;
+        while (shelfScope.parentElement && shelfScope.parentElement !== mainEl && guard++ < 10) {
+            var p = shelfScope.parentElement;
+            var pHeadings = p.querySelectorAll('h1, h2, h3, [role="heading"]');
+            var shelfTitleCount = 0;
+            for (var ph = 0; ph < pHeadings.length; ph++) {
+                var phEl = pHeadings[ph];
+                if (phEl.closest && phEl.closest('article, [class*="preview-card"], [data-a-target*="preview-card"]')) continue;
+                if (phEl.parentElement && phEl.parentElement.closest && phEl.parentElement.closest('h1, h2, h3, [role="heading"]')) continue;
+                shelfTitleCount++;
+            }
+            if (shelfTitleCount > 1) break;
+            shelfScope = p;
+        }
+
+        // Collecte les conteneurs de cette étagère (supporte à la fois une section englobante et des frères plats Header + Grille + Séparateur)
+        var searchScopes = [shelfScope];
+        var sib = shelfScope.nextElementSibling;
+        var sibSteps = 0;
+        while (sib && sibSteps++ < 3) {
+            var sibHasOtherTitle = false;
+            if (sib.matches && sib.matches('h1, h2, h3, [role="heading"]')) {
+                sibHasOtherTitle = true;
+            } else if (sib.querySelectorAll) {
+                var sibHds = sib.querySelectorAll('h1, h2, h3, [role="heading"]');
+                for (var sh = 0; sh < sibHds.length; sh++) {
+                    if (!sibHds[sh].closest || !sibHds[sh].closest('article, [class*="preview-card"], [data-a-target*="preview-card"]')) {
+                        sibHasOtherTitle = true;
+                        break;
+                    }
+                }
+            }
+            if (sibHasOtherTitle) break;
+            searchScopes.push(sib);
+            sib = sib.nextElementSibling;
+        }
+
+        var showMoreBtn = null;
+        var cardCount = 0;
+        for (var s = 0; s < searchScopes.length; s++) {
+            var sc = searchScopes[s];
+            if (!sc || !sc.querySelectorAll) continue;
+            var scCards = sc.querySelectorAll('[data-a-target="preview-card-image-link"], article, [class*="preview-card"]');
+            cardCount += scCards.length;
+            if (showMoreBtn) continue;
+            var btns = sc.querySelectorAll(
+                'button[data-a-target*="show-more" i], button[data-test-selector*="ShowMore" i], button'
+            );
+            for (var b = 0; b < btns.length; b++) {
+                var btn = btns[b];
+                if (!btn || btn.tagName !== 'BUTTON' || btn.disabled) continue;
+                if (btn.closest && btn.closest('article, [class*="preview-card"], [data-a-target*="preview-card"]')) continue;
+                var dt = ((btn.getAttribute('data-a-target') || '') + ' ' + (btn.getAttribute('data-test-selector') || '')).toLowerCase();
+                var bTxt = (btn.textContent || '').replace(/[\u25bc\u25be\u2304\s]+/g, ' ').trim();
+                var bAria = (btn.getAttribute('aria-label') || '').trim();
+                var isShowMore =
+                    dt.indexOf('show-more') !== -1 ||
+                    dt.indexOf('showmore') !== -1 ||
+                    /^(afficher\s+plus|voir\s+plus|show\s+more)$/i.test(bTxt) ||
+                    /^(afficher\s+plus|voir\s+plus|show\s+more)/i.test(bAria);
+                if (!isShowMore || /moins|less|tout|\ball\b/i.test(bTxt)) continue;
+                var r = btn.getBoundingClientRect ? btn.getBoundingClientRect() : { width: 10, height: 10 };
+                if (r.width <= 0 || r.height <= 0) continue;
+                showMoreBtn = btn;
+                break;
+            }
+        }
+
+        if (!showMoreBtn) return false;
+
+        if (bttvHomeLiveExpandClicks > 0 && cardCount > 0 && cardCount === bttvHomeLiveLastCardCount) {
+            bttvHomeLiveStagnantCount++;
+            if (bttvHomeLiveStagnantCount >= 2) {
+                return false;
+            }
+        } else {
+            bttvHomeLiveLastCardCount = cardCount;
+            bttvHomeLiveStagnantCount = 0;
+        }
+
+        bttvHomeLiveExpandLastAt = now;
+        bttvHomeLiveExpandClicks++;
+        try {
+            showMoreBtn.click();
+        } catch (e) {}
+
+        // Masque immédiatement les éventuels streams de catégories bloquées nouvellement chargés
+        if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(function () {
+                sweepBlockedCategories();
+            });
+        }
+        setTimeout(sweepBlockedCategories, 120);
+        setTimeout(sweepBlockedCategories, 350);
+        return true;
+    }
+
+    function handleExpandHomeLiveToggle(enabled) {
+        if (bttvHomeLiveExpandTimer) {
+            clearInterval(bttvHomeLiveExpandTimer);
+            bttvHomeLiveExpandTimer = null;
+        }
+        bttvHomeLiveExpandClicks = 0;
+        bttvHomeLiveLastCardCount = 0;
+        bttvHomeLiveStagnantCount = 0;
+        bttvHomeLiveExpandLastAt = 0;
+        if (!enabled) return;
+        expandHomeRecommendedLiveShelf(true);
+        var steps = 0;
+        bttvHomeLiveExpandTimer = setInterval(function () {
+            steps++;
+            var clicked = expandHomeRecommendedLiveShelf(true);
+            if (!clicked || steps >= 8 || !pageConfig.autoExpandHomeLive) {
+                clearInterval(bttvHomeLiveExpandTimer);
+                bttvHomeLiveExpandTimer = null;
+            }
+        }, 350);
+    }
+
+    // ============================================================
+    // MASQUAGE DE CATÉGORIES TWITCH & DES STREAMERS ASSOCIÉS
+    // ============================================================
+
+    var KNOWN_TWITCH_CATEGORY_ALIASES = [
+        { slug: 'grand-theft-auto-vi', names: ['grand theft auto vi', 'gta vi', 'gta 6', 'gtavi', 'gta6'] },
+        { slug: 'grand-theft-auto-v', names: ['grand theft auto v', 'gta v', 'gta 5', 'gtav', 'gta5'] },
+        { slug: 'league-of-legends', names: ['league of legends', 'lol'] },
+        { slug: 'counter-strike', names: ['counter strike', 'counter strike 2', 'cs2', 'cs go', 'csgo'] },
+        { slug: 'call-of-duty-warzone', names: ['call of duty warzone', 'warzone'] },
+        { slug: 'ea-sports-fc-25', names: ['ea sports fc 25', 'fc 25', 'fc25'] },
+        { slug: 'ea-sports-fc-26', names: ['ea sports fc 26', 'fc 26', 'fc26'] },
+        { slug: 'just-chatting', names: ['just chatting', 'discussion', 'discussions'] },
+        { slug: 'special-events', names: ['special events', 'evenements speciaux', 'evenement special'] },
+        { slug: 'music', names: ['music', 'musique', 'musiques'] },
+        { slug: 'art', names: ['art', 'arts'] },
+        { slug: 'sports', names: ['sports', 'sport'] },
+        { slug: 'food-and-drink', names: ['food and drink', 'food drink', 'cuisine', 'nourriture et boissons'] },
+        { slug: 'travel-and-outdoors', names: ['travel and outdoors', 'travel outdoors', 'voyages et nature'] },
+        { slug: 'science-and-technology', names: ['science and technology', 'science technology', 'science et technologie', 'sciences et technologie'] },
+        { slug: 'talk-shows-and-podcasts', names: ['talk shows and podcasts', 'talk shows podcasts', 'discussions et podcasts', 'talk shows et podcasts'] },
+        { slug: 'animals-aquariums-and-zoos', names: ['animals aquariums and zoos', 'animaux', 'animaux aquariums et zoos'] },
+        { slug: 'retro', names: ['retro', 'jeux retro'] },
+        { slug: 'asmr', names: ['asmr'] },
+        { slug: 'irl', names: ['irl'] }
+    ];
+
+    var bttvBlockedCatNormSet = new Set();
+    var bttvBlockedCatSlugSet = new Set();
+    var bttvBlockedCatSignature = '';
+    var bttvBlockedCatStyleEl = null;
+    var bttvHadBlockedCatMarks = false;
+    var bttvCarouselLastSkipAt = 0;
+    var bttvCarouselSkipCount = 0;
+
+    function normalizeCategoryKey(str) {
+        if (!str || typeof str !== 'string') return '';
+        var s = str.trim().toLowerCase();
+        if (!s) return '';
+        try {
+            s = s.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+        } catch (e) {}
+        return s.replace(/['\u2019`]/g, '').replace(/&/g, ' and ').replace(/[^a-z0-9]+/g, ' ').trim();
+    }
+
+    function slugifyCategoryName(str) {
+        var norm = normalizeCategoryKey(str);
+        return norm ? norm.replace(/\s+/g, '-') : '';
+    }
+
+    function extractCategorySlugFromHref(href) {
+        if (!href || typeof href !== 'string') return '';
+        var m = href.match(/\/directory\/category\/([^/?#]+)/i);
+        if (m && m[1]) {
+            try { return decodeURIComponent(m[1]).trim().toLowerCase(); } catch (e) { return m[1].trim().toLowerCase(); }
+        }
+        var mg = href.match(/\/directory\/game\/([^/?#]+)/i);
+        if (mg && mg[1]) {
+            try { return slugifyCategoryName(decodeURIComponent(mg[1])); } catch (e2) { return slugifyCategoryName(mg[1]); }
+        }
+        return '';
+    }
+
+    function searchTwitchCategoriesGql(queryStr, limit) {
+        var q = (queryStr || '').trim();
+        if (!q) return Promise.resolve([]);
+        return sendTwitchEmoteGql({
+            query: 'query($query:String!,$first:Int){searchCategories(query:$query,first:$first){edges{node{id name displayName slug boxArtURL(width:40,height:54)}}}}',
+            variables: { query: q, first: limit || 6 }
+        }).then(function (res) {
+            var edges = res && res.data && res.data.searchCategories && Array.isArray(res.data.searchCategories.edges)
+                ? res.data.searchCategories.edges
+                : [];
+            var out = [];
+            for (var i = 0; i < edges.length; i++) {
+                var n = edges[i] && edges[i].node;
+                if (!n || (!n.name && !n.displayName)) continue;
+                out.push({
+                    id: n.id ? String(n.id) : '',
+                    name: String(n.name || n.displayName || '').trim(),
+                    displayName: String(n.displayName || n.name || '').trim(),
+                    slug: String(n.slug || slugifyCategoryName(n.name || n.displayName)).trim().toLowerCase(),
+                    boxArt: n.boxArtURL ? String(n.boxArtURL) : ''
+                });
+            }
+            return out;
+        }).catch(function () {
+            return [];
+        });
+    }
+
+    function resolveBlockedCategorySlugAsync(rawLabel) {
+        var normTarget = normalizeCategoryKey(rawLabel);
+        if (!normTarget) return;
+        searchTwitchCategoriesGql(rawLabel, 5).then(function (items) {
+            if (!items || !items.length) return;
+            var best = null;
+            for (var i = 0; i < items.length; i++) {
+                var it = items[i];
+                if (
+                    normalizeCategoryKey(it.displayName) === normTarget ||
+                    normalizeCategoryKey(it.name) === normTarget ||
+                    it.slug === slugifyCategoryName(rawLabel)
+                ) {
+                    best = it;
+                    break;
+                }
+            }
+            if (!best) return;
+            if (!pageConfig.blockedCategoryMeta || typeof pageConfig.blockedCategoryMeta !== 'object') {
+                pageConfig.blockedCategoryMeta = {};
+            }
+            pageConfig.blockedCategoryMeta[normTarget] = {
+                slug: best.slug,
+                name: best.name,
+                displayName: best.displayName
+            };
+            saveConfig(pageConfig);
+            broadcastConfig();
+            syncBlockedCategoriesState();
+        });
+    }
+
+    function rebuildBlockedCategoryIndex() {
+        bttvBlockedCatNormSet.clear();
+        bttvBlockedCatSlugSet.clear();
+        if (scriptIsOff() || pageConfig.hideCategories === false || !Array.isArray(pageConfig.blockedCategories) || !pageConfig.blockedCategories.length) {
+            return;
+        }
+        var metaMap = (pageConfig.blockedCategoryMeta && typeof pageConfig.blockedCategoryMeta === 'object')
+            ? pageConfig.blockedCategoryMeta
+            : {};
+
+        for (var i = 0; i < pageConfig.blockedCategories.length; i++) {
+            var raw = String(pageConfig.blockedCategories[i] || '').trim();
+            if (!raw) continue;
+            var pastedSlug = extractCategorySlugFromHref(raw);
+            if (pastedSlug) {
+                bttvBlockedCatSlugSet.add(pastedSlug);
+                bttvBlockedCatNormSet.add(pastedSlug.replace(/-/g, ' '));
+            }
+            var norm = normalizeCategoryKey(raw);
+            if (norm) {
+                bttvBlockedCatNormSet.add(norm);
+                var autoSlug = norm.replace(/\s+/g, '-');
+                if (autoSlug) bttvBlockedCatSlugSet.add(autoSlug);
+
+                var m = metaMap[norm];
+                if (m && typeof m === 'object') {
+                    if (m.slug) bttvBlockedCatSlugSet.add(String(m.slug).trim().toLowerCase());
+                    if (m.name) {
+                        var mNorm = normalizeCategoryKey(m.name);
+                        if (mNorm) {
+                            bttvBlockedCatNormSet.add(mNorm);
+                            bttvBlockedCatSlugSet.add(mNorm.replace(/\s+/g, '-'));
+                        }
+                    }
+                    if (m.displayName) {
+                        var dNorm = normalizeCategoryKey(m.displayName);
+                        if (dNorm) bttvBlockedCatNormSet.add(dNorm);
+                    }
+                }
+            }
+            for (var a = 0; a < KNOWN_TWITCH_CATEGORY_ALIASES.length; a++) {
+                var al = KNOWN_TWITCH_CATEGORY_ALIASES[a];
+                if (al.slug === pastedSlug || al.slug === slugifyCategoryName(raw) || al.names.indexOf(norm) !== -1) {
+                    bttvBlockedCatSlugSet.add(al.slug);
+                    for (var nIdx = 0; nIdx < al.names.length; nIdx++) {
+                        bttvBlockedCatNormSet.add(al.names[nIdx]);
+                    }
+                }
+            }
+        }
+    }
+
+    function isCategoryBlocked(catName, catSlug) {
+        if (!bttvBlockedCatNormSet.size && !bttvBlockedCatSlugSet.size) return false;
+        if (catSlug) {
+            var cleanSlug = String(catSlug).trim().toLowerCase();
+            if (cleanSlug && bttvBlockedCatSlugSet.has(cleanSlug)) return true;
+        }
+        if (catName) {
+            var norm = normalizeCategoryKey(catName);
+            if (norm && (bttvBlockedCatNormSet.has(norm) || bttvBlockedCatSlugSet.has(norm.replace(/\s+/g, '-')))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function syncBlockedCategoriesStyleSheet() {
+        if (typeof document === 'undefined' || !document.head) return;
+        var sig = (scriptIsOff() || pageConfig.hideCategories === false)
+            ? ''
+            : Array.from(bttvBlockedCatSlugSet).sort().join('|');
+        if (sig === bttvBlockedCatSignature && bttvBlockedCatStyleEl) return;
+        bttvBlockedCatSignature = sig;
+
+        if (!sig) {
+            if (bttvBlockedCatStyleEl) {
+                bttvBlockedCatStyleEl.textContent = '';
+            }
+            return;
+        }
+        if (!bttvBlockedCatStyleEl) {
+            bttvBlockedCatStyleEl = document.getElementById('tp9-blocked-categories-style');
+            if (!bttvBlockedCatStyleEl) {
+                bttvBlockedCatStyleEl = document.createElement('style');
+                bttvBlockedCatStyleEl.id = 'tp9-blocked-categories-style';
+                document.head.appendChild(bttvBlockedCatStyleEl);
+            }
+        }
+
+        var linkSelectors = [];
+        bttvBlockedCatSlugSet.forEach(function (slug) {
+            if (!slug || !/^[a-z0-9][a-z0-9_-]{0,120}$/.test(slug)) return;
+            linkSelectors.push('a[href="/directory/category/' + slug + '" i]');
+            linkSelectors.push('a[href^="/directory/category/' + slug + '?" i]');
+            linkSelectors.push('a[href^="/directory/category/' + slug + '/" i]');
+            linkSelectors.push('a[href$="/directory/category/' + slug + '" i]');
+        });
+
+        if (!linkSelectors.length) {
+            bttvBlockedCatStyleEl.textContent = '';
+            return;
+        }
+
+        var joined = linkSelectors.join(', ');
+        bttvBlockedCatStyleEl.textContent =
+            'body.tp9-hide-categories .tw-tower > div:not(:has(.tw-tower)):not(:has(.video-player)):has(' + joined + '),' +
+            'body.tp9-hide-categories [class*="ScTower"] > div:not(:has([class*="ScTower"])):not(:has(.video-player)):has(' + joined + '),' +
+            'body.tp9-hide-categories .shelf-card__impression-wrapper:not(:has(.video-player)):has(' + joined + '),' +
+            'body.tp9-hide-categories [data-test-selector="shelf-card-selector"]:not(:has(.video-player)):has(' + joined + '),' +
+            'body.tp9-hide-categories [data-a-target="search-result-live-channel"]:has(' + joined + '),' +
+            'body.tp9-hide-categories [data-a-target="search-result-category"]:has(' + joined + '),' +
+            'body.tp9-hide-categories [class*="box-art-card"]:not(:has(.video-player)):has(' + joined + '),' +
+            'body.tp9-hide-categories [data-a-target*="box-art-card"]:not(:has(.video-player)):has(' + joined + '),' +
+            'body.tp9-hide-categories article:not(:has(article)):not(:has(.video-player)):has(' + joined + ') {' +
+                'display: none !important;' +
+            '}' +
+            'body.tp9-hide-categories .tw-tower:has(> div:not(:has(.video-player)):has(' + joined + ')) > div:not(.tw-tower__placeholder):not([class*="ScTowerPlaceholder"]),' +
+            'body.tp9-hide-categories [class*="ScTower"]:has(> div:not(:has(.video-player)):has(' + joined + ')) > div:not(.tw-tower__placeholder):not([class*="ScTowerPlaceholder"]) {' +
+                'flex-grow: 0 !important;' +
+                'max-width: var(--tp9-card-slot-w, 380px) !important;' +
+            '}';
+    }
+
+    function extractCategoryFromFiberGameObj(gameObj) {
+        if (!gameObj || typeof gameObj !== 'object') return null;
+        var name = gameObj.displayName || gameObj.name || '';
+        var slug = gameObj.slug || '';
+        if ((typeof name === 'string' && name.trim()) || (typeof slug === 'string' && slug.trim())) {
+            return {
+                name: typeof name === 'string' ? name.trim() : '',
+                slug: typeof slug === 'string' ? slug.trim().toLowerCase() : ''
+            };
+        }
+        return null;
+    }
+
+    function extractReactTextDeep(node, depth) {
+        var d = depth || 0;
+        if (!node || d > 5) return '';
+        if (typeof node === 'string') return node.trim();
+        if (typeof node === 'number') return String(node);
+        if (Array.isArray(node)) {
+            for (var i = 0; i < node.length; i++) {
+                var sub = extractReactTextDeep(node[i], d + 1);
+                if (sub) return sub;
+            }
+            return '';
+        }
+        if (typeof node === 'object' && node.props && typeof node.props === 'object') {
+            if (typeof node.props.title === 'string' && node.props.title.trim()) {
+                return node.props.title.trim();
+            }
+            return extractReactTextDeep(node.props.children, d + 1);
+        }
+        return '';
+    }
+
+    function getDomReactFiberOrProps(el) {
+        if (!el || typeof el !== 'object') return { fiber: null, props: null };
+        var fiber = typeof getReactFiberFromDom === 'function' ? getReactFiberFromDom(el) : null;
+        var props = null;
+        try {
+            var keys = Object.keys(el);
+            for (var k = 0; k < keys.length; k++) {
+                var key = keys[k];
+                if (!fiber && (key.indexOf('__reactFiber$') === 0 || key.indexOf('__reactInternalInstance$') === 0)) {
+                    fiber = el[key];
+                } else if (!props && key.indexOf('__reactProps$') === 0) {
+                    props = el[key];
+                }
+            }
+        } catch (e) {}
+        return { fiber: fiber, props: props };
+    }
+
+    function extractSidebarCardCategory(card) {
+        if (!card || isSidebarCardOffline(card)) return { name: '', slug: '' };
+
+        // 1. Sélecteurs DOM directs de la barre latérale Twitch (actuels : side-nav-card-metadata / side-nav-card__metadata + anciens : side-nav-game-title)
+        if (card.querySelectorAll) {
+            var metaCandidates = card.querySelectorAll(
+                '[data-a-target="side-nav-game-title"], ' +
+                '[data-a-target="side-nav-card-metadata"] p, ' +
+                '.side-nav-card__metadata p, ' +
+                '[data-a-target="side-nav-card-metadata"], ' +
+                '.side-nav-card__metadata'
+            );
+            for (var m = 0; m < metaCandidates.length; m++) {
+                var mc = metaCandidates[m];
+                if (!mc) continue;
+                // Si le conteneur possède un <p> enfant, on privilégie le <p> pour ne pas concaténer « Série de visionnage… »
+                if (mc.tagName !== 'P' && mc.querySelector && mc.querySelector('p')) continue;
+                var mTitle = (mc.getAttribute && mc.getAttribute('title')) ? mc.getAttribute('title').trim() : '';
+                if (mTitle) return { name: mTitle, slug: '' };
+                var mTxt = (mc.textContent || '').trim();
+                if (mTxt) return { name: mTxt, slug: '' };
+            }
+        } else if (card.querySelector) {
+            var singleMeta = card.querySelector('[data-a-target="side-nav-game-title"], [data-a-target="side-nav-card-metadata"], .side-nav-card__metadata');
+            if (singleMeta) {
+                var smTxt = ((singleMeta.getAttribute && singleMeta.getAttribute('title')) || singleMeta.textContent || '').trim();
+                if (smTxt) return { name: smTxt, slug: '' };
+            }
+        }
+
+        // 2. Parcours React Fiber / __reactProps$ (couvre aussi la barre latérale réduite en icônes 50px et les classes CoreUI obfusquées)
+        var now = Date.now();
+        if (card.__tp9CatCache && (now - card.__tp9CatCache.ts) < 4000) {
+            return card.__tp9CatCache.val;
+        }
+        var found = { name: '', slug: '' };
+        var startInfo = getDomReactFiberOrProps(card);
+        var fiber = startInfo.fiber;
+        if (!fiber && card.querySelector) {
+            var innerLink = card.querySelector('a[href]');
+            if (innerLink) {
+                fiber = getDomReactFiberOrProps(innerLink).fiber;
+            }
+        }
+        var depth = 0;
+        while (fiber && depth++ < 24) {
+            var sn = fiber.stateNode;
+            if (sn && sn.nodeType === 1 && sn !== card && sn.querySelectorAll) {
+                var multiCards = sn.querySelectorAll('.side-nav-card, [data-a-target="side-nav-card"]');
+                if (multiCards && multiCards.length > 1) break;
+            }
+            var p = fiber.memoizedProps;
+            if (p && typeof p === 'object') {
+                var gCand =
+                    extractCategoryFromFiberGameObj(p.game) ||
+                    extractCategoryFromFiberGameObj(p.stream && p.stream.game) ||
+                    extractCategoryFromFiberGameObj(p.content && p.content.stream && p.content.stream.game) ||
+                    extractCategoryFromFiberGameObj(p.user && p.user.stream && p.user.stream.game) ||
+                    extractCategoryFromFiberGameObj(p.channel && p.channel.stream && p.channel.stream.game) ||
+                    extractCategoryFromFiberGameObj(p.broadcaster && p.broadcaster.stream && p.broadcaster.stream.game) ||
+                    extractCategoryFromFiberGameObj(p.broadcaster && p.broadcaster.broadcastSettings && p.broadcaster.broadcastSettings.game);
+                if (gCand) {
+                    found = gCand;
+                    break;
+                }
+                if (typeof p.gameName === 'string' && p.gameName.trim()) {
+                    found = { name: p.gameName.trim(), slug: '' };
+                    break;
+                }
+                if (typeof p.gameTitle === 'string' && p.gameTitle.trim()) {
+                    found = { name: p.gameTitle.trim(), slug: '' };
+                    break;
+                }
+                if (typeof p.categoryName === 'string' && p.categoryName.trim()) {
+                    found = { name: p.categoryName.trim(), slug: '' };
+                    break;
+                }
+                if (p.metadata) {
+                    var metaStr = extractReactTextDeep(p.metadata, 0);
+                    if (metaStr && !/^(déconnecté(?:\(e\))?|hors\s*ligne|offline)$/i.test(metaStr)) {
+                        found = { name: metaStr, slug: '' };
+                        break;
+                    }
+                }
+            }
+            fiber = fiber.return;
+        }
+        card.__tp9CatCache = { ts: now, val: found };
+        return found;
+    }
+
+    function isSidebarCardBlockedByCategory(card) {
+        if (!card || (!bttvBlockedCatNormSet.size && !bttvBlockedCatSlugSet.size)) return false;
+        if (isSidebarCardOffline(card)) return false;
+        var info = extractSidebarCardCategory(card);
+        if (isCategoryBlocked(info.name, info.slug)) return true;
+
+        // Secours universel indépendant des classes : teste les sous-textes / attributs [title] / aria-label de la carte
+        // (en ignorant le pseudo du streamer et le compteur de spectateurs) au cas où Twitch change ses classes CoreUI
+        var titleNode = card.querySelector ? card.querySelector('.side-nav-card__title, [data-a-target="side-nav-title"]') : null;
+        var authorTxt = titleNode ? normalizeCategoryKey(titleNode.textContent || '') : '';
+        if (card.querySelectorAll) {
+            var leafNodes = card.querySelectorAll('p, span, [title]');
+            for (var i = 0; i < leafNodes.length; i++) {
+                var ln = leafNodes[i];
+                if (!ln) continue;
+                if (titleNode && (ln === titleNode || (titleNode.contains && titleNode.contains(ln)))) continue;
+                if (ln.closest && ln.closest('.side-nav-card__title, [data-a-target="side-nav-title"], [data-a-target="side-nav-live-status"], .side-nav-card__live-status')) {
+                    continue;
+                }
+                var tAttr = (ln.getAttribute && ln.getAttribute('title')) ? ln.getAttribute('title').trim() : '';
+                if (tAttr && normalizeCategoryKey(tAttr) !== authorTxt && isCategoryBlocked(tAttr, '')) {
+                    return true;
+                }
+                if ((!ln.children || ln.children.length === 0) && ln.textContent) {
+                    var lTxt = ln.textContent.trim();
+                    if (lTxt && normalizeCategoryKey(lTxt) !== authorTxt && isCategoryBlocked(lTxt, '')) {
+                        return true;
+                    }
+                }
+            }
+        }
+        var linkNode = (card.getAttribute && card.getAttribute('aria-label')) ? card : (card.querySelector && card.querySelector('[aria-label]'));
+        if (linkNode && linkNode.getAttribute) {
+            var ariaVal = linkNode.getAttribute('aria-label') || '';
+            if (ariaVal) {
+                var ariaParts = ariaVal.split(/\s*(?:[-•·|\n])\s*/);
+                for (var ap = 0; ap < ariaParts.length; ap++) {
+                    var seg = ariaParts[ap].trim();
+                    if (seg && normalizeCategoryKey(seg) !== authorTxt && isCategoryBlocked(seg, '')) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    function elementContainsCardVisual(node) {
+        if (!node || node.nodeType !== 1) return false;
+        if (node.tagName === 'ARTICLE' || node.tagName === 'IMG') return true;
+        if (node.matches && node.matches(
+            '[data-a-target="preview-card-image-link"], ' +
+            '[data-a-target*="box-art"], ' +
+            '[class*="box-art-card"], ' +
+            '[class*="game-card"], ' +
+            '[class*="preview-card"]'
+        )) {
+            return true;
+        }
+        if (!node.querySelector) return false;
+        return Boolean(node.querySelector(
+            'img, ' +
+            'article, ' +
+            '[data-a-target="preview-card-image-link"], ' +
+            '[data-a-target*="box-art"], ' +
+            '[class*="box-art-card"], ' +
+            '[class*="game-card"], ' +
+            '[class*="preview-card"]'
+        ));
+    }
+
+    function findHideableCategoryCardWrapper(el, scopeRoot) {
+        if (!el || el.nodeType !== 1) return null;
+        if (el.closest && el.closest('.channel-info-content, [data-a-target="stream-game-link"], .video-player, .stream-chat, #tp9-dashboard')) {
+            return null;
+        }
+        var origHref = (el.getAttribute && el.getAttribute('href')) || '';
+        var cur = el;
+        var best = null;
+        var guard = 0;
+        while (cur && cur !== scopeRoot && cur !== document.body && cur !== document.documentElement && guard++ < 15) {
+            var p = cur.parentElement;
+            if (!p) break;
+            if (cur.querySelector && cur.querySelector('.video-player, .stream-chat')) break;
+            var cls = typeof cur.className === 'string' ? cur.className : '';
+            var pCls = typeof p.className === 'string' ? p.className : '';
+            var dt = (cur.getAttribute && (cur.getAttribute('data-test-selector') || cur.getAttribute('data-a-target'))) || '';
+            var pRole = (p.getAttribute && p.getAttribute('role')) || '';
+            if (
+                cur.tagName === 'ARTICLE' ||
+                cls.indexOf('shelf-card__impression-wrapper') !== -1 ||
+                cls.indexOf('box-art-card') !== -1 ||
+                cls.indexOf('game-card') !== -1 ||
+                dt === 'shelf-card-selector' ||
+                dt === 'search-result-live-channel' ||
+                dt === 'search-result-category'
+            ) {
+                best = cur;
+            }
+            if (pCls.indexOf('tw-tower') !== -1 || pCls.indexOf('ScTower') !== -1 || pRole === 'list') {
+                return cur;
+            }
+            // Détection structurelle universelle (même avec classes CoreUI obfusquées Layout-sc-...) :
+            // dès que `cur` englobe le visuel de la carte (miniature/jaquette) ET que le parent `p` possède
+            // au moins une autre carte sœur distincte (ou un titre de section h1/h2/h3), `cur` est la cellule exacte !
+            if (cur !== el && p.children && p.children.length > 1) {
+                var curHasVisual = elementContainsCardVisual(cur);
+                var hasSiblingCard = false;
+                var hasSectionHeading = false;
+                for (var s = 0; s < p.children.length; s++) {
+                    var sib = p.children[s];
+                    if (!sib || sib === cur || sib.nodeType !== 1) continue;
+                    var sTag = sib.tagName;
+                    if (sTag === 'H1' || sTag === 'H2' || sTag === 'H3' || sTag === 'HEADER') {
+                        hasSectionHeading = true;
+                        break;
+                    }
+                    if (curHasVisual && elementContainsCardVisual(sib)) {
+                        hasSiblingCard = true;
+                        break;
+                    }
+                    if (sib.querySelector) {
+                        var sibCatLink = sib.querySelector('a[href*="/directory/category/"], a[href*="/directory/game/"]');
+                        if (sibCatLink && (!origHref || sibCatLink.getAttribute('href') !== origHref)) {
+                            hasSiblingCard = true;
+                            break;
+                        }
+                    }
+                }
+                if (hasSiblingCard) {
+                    return cur;
+                }
+                if (hasSectionHeading && curHasVisual) {
+                    return best || cur;
+                }
+            }
+            if (p === scopeRoot || p.tagName === 'MAIN') {
+                return best || (cur !== el ? cur : null);
+            }
+            cur = p;
+        }
+        return best;
+    }
+
+    function clearRowCardCapStyle(rowEl) {
+        if (!rowEl || !rowEl.classList) return;
+        rowEl.classList.remove('tp9-row-capped-cards');
+        if (rowEl.style && typeof rowEl.style.removeProperty === 'function') {
+            rowEl.style.removeProperty('--tp9-card-slot-w');
+            if (rowEl.__tp9GridCapped) {
+                rowEl.style.removeProperty('grid-template-columns');
+                rowEl.__tp9GridCapped = false;
+            }
+        }
+    }
+
+    function clearAllBlockedCategoryDomMarks() {
+        if (!bttvHadBlockedCatMarks || typeof document === 'undefined' || !document.querySelectorAll) return;
+        var prev = document.querySelectorAll('.tp9-blocked-category-hidden');
+        for (var i = 0; i < prev.length; i++) {
+            prev[i].classList.remove('tp9-blocked-category-hidden');
+        }
+        var prevShelves = document.querySelectorAll('.tp9-blocked-shelf-hidden');
+        for (var s = 0; s < prevShelves.length; s++) {
+            prevShelves[s].classList.remove('tp9-blocked-shelf-hidden');
+        }
+        var prevRows = document.querySelectorAll('.tp9-row-capped-cards');
+        for (var r = 0; r < prevRows.length; r++) {
+            clearRowCardCapStyle(prevRows[r]);
+        }
+        bttvHadBlockedCatMarks = false;
+    }
+
+    function containerHasVisibleCategoryCards(container) {
+        if (!container || !container.querySelectorAll) return false;
+        var visuals = container.querySelectorAll(
+            'article, ' +
+            '[data-a-target="preview-card-image-link"], ' +
+            '[data-a-target*="box-art"], ' +
+            '[class*="box-art-card"], ' +
+            '[class*="game-card"], ' +
+            '[class*="preview-card"]'
+        );
+        for (var i = 0; i < visuals.length; i++) {
+            var v = visuals[i];
+            if (!v) continue;
+            if (v.classList && v.classList.contains('tp9-blocked-category-hidden')) continue;
+            if (v.closest && v.closest('.tp9-blocked-category-hidden')) continue;
+            return true;
+        }
+        return false;
+    }
+
+    var SHELF_DIVIDER_ACTION_RE = /\b(afficher\s+tout|afficher\s+toutes|afficher\s+plus|voir\s+tout|voir\s+toutes|voir\s+plus|show\s+all|show\s+more|see\s+all|view\s+all|load\s+more)\b/i;
+
+    function countShelfHeadingsOutsideCards(container) {
+        if (!container || !container.querySelectorAll) return 0;
+        var hds = container.querySelectorAll('h1, h2, h3, [role="heading"]');
+        var count = 0;
+        for (var i = 0; i < hds.length; i++) {
+            var h = hds[i];
+            if (h.closest && h.closest('article, [class*="preview-card"], [data-a-target*="preview-card"], [class*="box-art"], [data-a-target*="box-art"]')) {
+                continue;
+            }
+            // Ne compte pas en double un <h2> imbriqué dans un <div role="heading"> (ou l'inverse)
+            if (h.parentElement && h.parentElement.closest && h.parentElement.closest('h1, h2, h3, [role="heading"]')) {
+                continue;
+            }
+            count++;
+        }
+        return count;
+    }
+
+    function isShelfDividerElement(el) {
+        if (!el || el.nodeType !== 1) return false;
+        if (containerHasVisibleCategoryCards(el)) return false;
+        if (countShelfHeadingsOutsideCards(el) > 0) return false;
+        if (el.querySelector && el.querySelector('.featured-content-carousel, .video-player, .stream-chat')) return false;
+
+        var rawTxt = (el.textContent || '').replace(/[>\u203a\u25bc\u25be\u2304\s]+/g, ' ').trim();
+        if (!rawTxt) return true;
+        if (rawTxt.length <= 160 && SHELF_DIVIDER_ACTION_RE.test(rawTxt)) {
+            return true;
+        }
+        if (el.querySelectorAll) {
+            var actions = el.querySelectorAll('a, button');
+            if (actions.length >= 1 && actions.length <= 2) {
+                for (var i = 0; i < actions.length; i++) {
+                    var act = actions[i];
+                    var aStr = ((act.textContent || '') + ' ' + (act.getAttribute('aria-label') || '')).trim();
+                    if (SHELF_DIVIDER_ACTION_RE.test(aStr)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    function isEmptyCardRowOrShelfDivider(el) {
+        if (!el || el.nodeType !== 1) return false;
+        if (containerHasVisibleCategoryCards(el)) return false;
+        if (countShelfHeadingsOutsideCards(el) > 0) return false;
+        if (el.querySelector && el.querySelector('.featured-content-carousel, .video-player, .stream-chat')) return false;
+        // Rangée dont 100 % des cartes sont masquées (.tp9-blocked-category-hidden)
+        if (el.querySelector && el.querySelector('.tp9-blocked-category-hidden')) {
+            return true;
+        }
+        return isShelfDividerElement(el);
+    }
+
+    function hideEmptyCategoryShelf(startNode, mainEl) {
+        if (!startNode || startNode === mainEl || startNode === document.body) return;
+        var shelfBox = startNode;
+        var guard = 0;
+        while (
+            shelfBox.parentElement &&
+            shelfBox.parentElement !== mainEl &&
+            shelfBox.parentElement !== document.body &&
+            guard++ < 12
+        ) {
+            var p = shelfBox.parentElement;
+            if (p.querySelector && p.querySelector('.featured-content-carousel, .video-player, .stream-chat')) {
+                break;
+            }
+            if (containerHasVisibleCategoryCards(p)) {
+                break;
+            }
+            if (countShelfHeadingsOutsideCards(p) > 1) {
+                break;
+            }
+            shelfBox = p;
+        }
+        shelfBox.classList.add('tp9-blocked-shelf-hidden');
+        bttvHadBlockedCatMarks = true;
+
+        // Cas où Twitch monte l'en-tête (« GTA6 »), la grille et le séparateur (« Afficher tout > ») en frères adjacents
+        // (y compris avec texte lecteur d'écran « Afficher tout GTA6 » ou sous-conteneur intermédiaire) :
+        var walkAnchor = shelfBox;
+        for (var upLvl = 0; upLvl < 2 && walkAnchor && walkAnchor !== mainEl; upLvl++) {
+            if (countShelfHeadingsOutsideCards(walkAnchor) === 0) {
+                var prevSib = walkAnchor.previousElementSibling;
+                var prevSteps = 0;
+                while (prevSib && prevSteps++ < 2) {
+                    if (containerHasVisibleCategoryCards(prevSib)) break;
+                    if (prevSib.querySelector && prevSib.querySelector('.featured-content-carousel, .video-player, .stream-chat')) break;
+                    var prevHeadings = countShelfHeadingsOutsideCards(prevSib);
+                    if (prevHeadings === 1) {
+                        prevSib.classList.add('tp9-blocked-shelf-hidden');
+                        break;
+                    } else if (prevHeadings === 0 && isEmptyCardRowOrShelfDivider(prevSib)) {
+                        prevSib.classList.add('tp9-blocked-shelf-hidden');
+                        prevSib = prevSib.previousElementSibling;
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            var nextSib = walkAnchor.nextElementSibling;
+            var nextSteps = 0;
+            while (nextSib && nextSteps++ < 4) {
+                if (isEmptyCardRowOrShelfDivider(nextSib)) {
+                    nextSib.classList.add('tp9-blocked-shelf-hidden');
+                    nextSib = nextSib.nextElementSibling;
+                } else {
+                    break;
+                }
+            }
+
+            if (
+                walkAnchor.parentElement &&
+                walkAnchor.parentElement !== mainEl &&
+                !containerHasVisibleCategoryCards(walkAnchor.parentElement) &&
+                countShelfHeadingsOutsideCards(walkAnchor.parentElement) <= 1
+            ) {
+                walkAnchor = walkAnchor.parentElement;
+            } else {
+                break;
+            }
+        }
+    }
+
+    function syncMainShelvesAndCardRowWidths(mainEl) {
+        if (!mainEl || !mainEl.querySelectorAll) return;
+
+        // A. Réévalue les étagères précédemment masquées : si une carte visible non bloquée y est apparue, on la réaffiche
+        var prevShelves = mainEl.querySelectorAll('.tp9-blocked-shelf-hidden');
+        for (var ps = 0; ps < prevShelves.length; ps++) {
+            prevShelves[ps].classList.remove('tp9-blocked-shelf-hidden');
+        }
+
+        // B. Détecte les étagères thématiques dédiées à une catégorie masquée (ex: « GTA6 » + « Afficher tout > »)
+        var shelfHeadings = mainEl.querySelectorAll('h2, h3');
+        for (var sh = 0; sh < shelfHeadings.length; sh++) {
+            var hd = shelfHeadings[sh];
+            if (!hd || (hd.closest && hd.closest('article, [class*="preview-card"], [data-a-target*="preview-card"], .tp9-blocked-category-hidden, .tp9-blocked-shelf-hidden'))) {
+                continue;
+            }
+            var hdLink = hd.querySelector ? hd.querySelector('a[href*="/directory/category/"], a[href*="/directory/game/"]') : null;
+            var hdSlug = hdLink ? extractCategorySlugFromHref(hdLink.getAttribute('href') || '') : '';
+            var hdCleanTxt = (hd.textContent || '').replace(/\b(afficher\s+tout|voir\s+tout|show\s+all|see\s+all)\b/gi, '').trim();
+            if (isCategoryBlocked(hdCleanTxt, hdSlug)) {
+                // Masque aussi les cartes éventuellement rattachées à cette étagère dédiée si elles n'avaient pas encore de lien catégorie
+                if (!containerHasVisibleCategoryCards(hd.parentElement || hd)) {
+                    hideEmptyCategoryShelf(hd, mainEl);
+                }
+            }
+        }
+
+        // C. Inspecte chaque rangée contenant des cartes masquées :
+        //    - 0 carte visible restante -> masque toute l'étagère (titre + « Afficher tout > »)
+        //    - >= 1 carte visible restante -> plafonne la largeur (flex-grow: 0) à sa taille normale d'origine (1/N)
+        var hiddenCards = mainEl.querySelectorAll('.tp9-blocked-category-hidden');
+        var affectedRows = new Set();
+        for (var hc = 0; hc < hiddenCards.length; hc++) {
+            var hCard = hiddenCards[hc];
+            if (!hCard || (hCard.classList && hCard.classList.contains('featured-content-carousel'))) continue;
+            var rowParent = hCard.parentElement;
+            if (rowParent && rowParent !== mainEl && rowParent !== document.body) {
+                affectedRows.add(rowParent);
+            }
+        }
+
+        // Nettoie les rangées anciennement plafonnées qui n'ont plus aucune carte masquée
+        var prevCappedRows = mainEl.querySelectorAll('.tp9-row-capped-cards');
+        for (var pr = 0; pr < prevCappedRows.length; pr++) {
+            if (!affectedRows.has(prevCappedRows[pr])) {
+                clearRowCardCapStyle(prevCappedRows[pr]);
+            }
+        }
+
+        affectedRows.forEach(function (rowEl) {
+            if (!rowEl || !rowEl.children) return;
+            var hiddenCount = 0;
+            var visibleCount = 0;
+            var sampleCard = null;
+            var isBoxArtRow = false;
+
+            for (var k = 0; k < rowEl.children.length; k++) {
+                var ch = rowEl.children[k];
+                if (!ch || ch.nodeType !== 1) continue;
+                var chCls = typeof ch.className === 'string' ? ch.className : '';
+                if (chCls.indexOf('tw-tower__placeholder') !== -1 || chCls.indexOf('ScTowerPlaceholder') !== -1) {
+                    continue;
+                }
+                var chTag = ch.tagName;
+                if (chTag === 'H1' || chTag === 'H2' || chTag === 'H3' || chTag === 'HEADER') continue;
+
+                if (ch.classList && ch.classList.contains('tp9-blocked-category-hidden')) {
+                    hiddenCount++;
+                    if (!sampleCard) sampleCard = ch;
+                } else if (elementContainsCardVisual(ch) || (ch.querySelector && ch.querySelector('a[href]'))) {
+                    visibleCount++;
+                    sampleCard = ch;
+                }
+            }
+
+            if (sampleCard) {
+                var sCls = typeof sampleCard.className === 'string' ? sampleCard.className : '';
+                if (
+                    sCls.indexOf('box-art') !== -1 ||
+                    (sampleCard.querySelector && sampleCard.querySelector('[class*="box-art"], [data-a-target*="box-art"]'))
+                ) {
+                    isBoxArtRow = true;
+                }
+            }
+
+            if (visibleCount === 0 && hiddenCount > 0) {
+                clearRowCardCapStyle(rowEl);
+                hideEmptyCategoryShelf(rowEl, mainEl);
+                return;
+            }
+
+            if (visibleCount >= 1 && hiddenCount >= 1) {
+                var totalCards = visibleCount + hiddenCount;
+                var layoutHost = rowEl;
+                var cs = (typeof window !== 'undefined' && typeof window.getComputedStyle === 'function')
+                    ? window.getComputedStyle(layoutHost)
+                    : null;
+                if (cs && cs.display === 'contents' && layoutHost.parentElement && layoutHost.parentElement !== mainEl) {
+                    layoutHost = layoutHost.parentElement;
+                    cs = window.getComputedStyle(layoutHost);
+                }
+                var rowRect = layoutHost.getBoundingClientRect ? layoutHost.getBoundingClientRect() : { width: 0 };
+                var rowW = rowRect.width || 0;
+                var disp = cs ? (cs.display || '') : 'flex';
+                var flexWrap = cs ? (cs.flexWrap || '') : '';
+                var gapPx = cs ? (parseFloat(cs.columnGap || cs.gap) || 0) : 0;
+                var minSlotPx = isBoxArtRow ? 145 : 250;
+                var maxSingleRowSlots = isBoxArtRow ? 9 : 6;
+                var cols = 4;
+
+                if (flexWrap === 'nowrap' && totalCards >= 2) {
+                    cols = totalCards;
+                } else if (totalCards >= 2 && totalCards <= maxSingleRowSlots && (rowW <= 0 || (rowW / totalCards) >= minSlotPx)) {
+                    cols = totalCards;
+                } else {
+                    var basisPx = 0;
+                    if (sampleCard && typeof window !== 'undefined' && typeof window.getComputedStyle === 'function') {
+                        var cardCs = window.getComputedStyle(sampleCard);
+                        var fb = cardCs ? (cardCs.flexBasis || '') : '';
+                        if (fb && fb.indexOf('px') !== -1) {
+                            basisPx = parseFloat(fb) || 0;
+                        }
+                    }
+                    if (basisPx >= 120 && rowW > basisPx) {
+                        cols = Math.max(2, Math.floor((rowW + gapPx) / (basisPx + gapPx)));
+                    } else if (isBoxArtRow) {
+                        cols = rowW >= 1600 ? 8 : (rowW >= 1280 ? 6 : (rowW >= 900 ? 5 : 4));
+                    } else {
+                        cols = rowW >= 1850 ? 5 : (rowW >= 1280 ? 4 : (rowW >= 880 ? 3 : 2));
+                    }
+                }
+
+                var slotWidthExpr = gapPx > 0.5
+                    ? ('calc((100% - ' + ((cols - 1) * gapPx).toFixed(1) + 'px) / ' + cols + ')')
+                    : ((100 / cols).toFixed(4) + '%');
+
+                rowEl.classList.add('tp9-row-capped-cards');
+                if (rowEl.style && typeof rowEl.style.setProperty === 'function') {
+                    rowEl.style.setProperty('--tp9-card-slot-w', slotWidthExpr);
+                }
+                if (disp.indexOf('grid') !== -1 && layoutHost.style && typeof layoutHost.style.setProperty === 'function') {
+                    layoutHost.style.setProperty('grid-template-columns', 'repeat(' + cols + ', minmax(0, 1fr))', 'important');
+                    layoutHost.__tp9GridCapped = true;
+                    if (layoutHost !== rowEl) {
+                        layoutHost.classList.add('tp9-row-capped-cards');
+                        layoutHost.style.setProperty('--tp9-card-slot-w', slotWidthExpr);
+                    }
+                }
+                bttvHadBlockedCatMarks = true;
+            }
+        });
+
+        // D. Filet de sécurité final contre toute barre « Afficher tout > » / « Afficher plus » orpheline
+        //    (par ex. restée juste sous une étagère masquée ou pointant vers une catégorie bloquée)
+        var actionLinksAndBtns = mainEl.querySelectorAll('a[href], button');
+        for (var al = 0; al < actionLinksAndBtns.length; al++) {
+            var actEl = actionLinksAndBtns[al];
+            if (!actEl || (actEl.closest && actEl.closest('.tp9-blocked-category-hidden, .tp9-blocked-shelf-hidden, article, [class*="preview-card"], [data-a-target*="preview-card"]'))) {
+                continue;
+            }
+            var actLabel = ((actEl.textContent || '') + ' ' + (actEl.getAttribute('aria-label') || '')).trim();
+            if (!SHELF_DIVIDER_ACTION_RE.test(actLabel)) continue;
+
+            // Trouve la barre de séparation englobante de ce bouton/lien « Afficher tout > »
+            var dividerBar = actEl;
+            var dGuard = 0;
+            while (
+                dividerBar.parentElement &&
+                dividerBar.parentElement !== mainEl &&
+                dividerBar.parentElement !== document.body &&
+                isShelfDividerElement(dividerBar.parentElement) &&
+                dGuard++ < 8
+            ) {
+                dividerBar = dividerBar.parentElement;
+            }
+            if (!isShelfDividerElement(dividerBar)) continue;
+
+            var actHref = actEl.getAttribute('href') || '';
+            var actSlug = extractCategorySlugFromHref(actHref);
+            var strippedActName = actLabel
+                .replace(/\b(afficher\s+tout|afficher\s+toutes|afficher\s+plus|voir\s+tout|voir\s+plus|show\s+all|show\s+more|see\s+all|view\s+all|pour|les\s+chaînes|de|for|channels)\b/gi, '')
+                .replace(/[>\u203a\u25bc\u25be\u2304:·-]+/g, ' ')
+                .trim();
+
+            var directlyBlockedDivider = isCategoryBlocked(strippedActName, actSlug);
+
+            // Ou bien l'étagère/rangée immédiatement au-dessus de cette barre vient d'être masquée (.tp9-blocked-shelf-hidden)
+            var prevSibCheck = dividerBar.previousElementSibling;
+            var hadHiddenPrevShelf = Boolean(
+                prevSibCheck &&
+                prevSibCheck.classList &&
+                prevSibCheck.classList.contains('tp9-blocked-shelf-hidden')
+            );
+
+            if (directlyBlockedDivider || hadHiddenPrevShelf) {
+                dividerBar.classList.add('tp9-blocked-shelf-hidden');
+                bttvHadBlockedCatMarks = true;
+            }
+        }
+    }
+
+    function sweepBlockedCategories() {
+        if (typeof document === 'undefined' || !document.querySelectorAll) return;
+        var active = Boolean(
+            !scriptIsOff() &&
+            pageConfig.hideCategories !== false &&
+            (bttvBlockedCatNormSet.size > 0 || bttvBlockedCatSlugSet.size > 0)
+        );
+        if (!active) {
+            clearAllBlockedCategoryDomMarks();
+            return;
+        }
+
+        // 1. Barre latérale gauche (Chaînes suivies + Chaînes recommandées + Regardent aussi, mode déplié ou icônes)
+        var sideNav = document.querySelector('[data-a-target="side-nav-bar"], #side-nav, .side-nav, nav[aria-label*="latérale" i], nav[aria-label*="Side" i]');
+        if (sideNav) {
+            var rawSideNodes = sideNav.querySelectorAll(
+                '.side-nav-card, ' +
+                '[data-test-selector="followed-channel"], ' +
+                '[data-a-target="side-nav-card"], ' +
+                'a.side-nav-card__link'
+            );
+            var seenSideCards = new Set();
+            for (var i = 0; i < rawSideNodes.length; i++) {
+                var node = rawSideNodes[i];
+                var card = (node.closest && node.closest('.side-nav-card, [data-test-selector="followed-channel"]')) || node;
+                if (seenSideCards.has(card)) continue;
+                seenSideCards.add(card);
+
+                var blockedSide = isSidebarCardBlockedByCategory(card);
+                var pCard = card.parentElement;
+                var pCardCls = (pCard && typeof pCard.className === 'string') ? pCard.className : '';
+                var wrap = (
+                    pCard &&
+                    pCard !== sideNav &&
+                    pCard.children &&
+                    pCard.children.length === 1 &&
+                    (
+                        pCardCls.indexOf('tw-transition') !== -1 ||
+                        pCardCls.indexOf('ScTransition') !== -1 ||
+                        (pCard.getAttribute && pCard.getAttribute('role') === 'listitem')
+                    )
+                ) ? pCard : card;
+
+                if (blockedSide) bttvHadBlockedCatMarks = true;
+                card.classList.toggle('tp9-blocked-category-hidden', blockedSide);
+                if (wrap !== card) {
+                    wrap.classList.toggle('tp9-blocked-category-hidden', blockedSide);
+                } else if (!blockedSide && pCard && pCard.classList) {
+                    pCard.classList.remove('tp9-blocked-category-hidden');
+                }
+                if (blockedSide && bttvSidebarHoverLogin) {
+                    var linkEl = (card.getAttribute && card.getAttribute('href')) ? card : (card.querySelector && card.querySelector('a[href]'));
+                    var hrefVal = linkEl ? (linkEl.getAttribute('href') || '') : '';
+                    if (hrefVal.toLowerCase() === '/' + bttvSidebarHoverLogin) {
+                        hideSidebarLivePreview();
+                    }
+                }
+            }
+        }
+
+        // 2. Contenu principal (Parcourir /directory, Accueil /, Recherche /search, Suivis /directory/following)
+        var mainEl = document.querySelector('main');
+        if (!mainEl) return;
+
+        // Réévalue d'abord les cartes déjà masquées au cas où la catégorie d'un streamer a changé
+        if (bttvHadBlockedCatMarks) {
+            var prevMain = mainEl.querySelectorAll('.tp9-blocked-category-hidden');
+            for (var pm = 0; pm < prevMain.length; pm++) {
+                var markedEl = prevMain[pm];
+                if (markedEl.classList && markedEl.classList.contains('featured-content-carousel')) continue;
+                var subLinks = markedEl.querySelectorAll(
+                    '[data-a-target="preview-card-game-link"], [data-a-target="tw-card-title"], a[href*="/directory/category/"], a[href*="/directory/game/"]'
+                );
+                var stillBlocked = false;
+                for (var sl = 0; sl < subLinks.length; sl++) {
+                    var slEl = subLinks[sl];
+                    var slSlug = extractCategorySlugFromHref(slEl.getAttribute('href') || '');
+                    var slTxt = (slEl.textContent || '').trim();
+                    if (isCategoryBlocked(slTxt, slSlug)) {
+                        stillBlocked = true;
+                        break;
+                    }
+                }
+                if (!stillBlocked) {
+                    markedEl.classList.remove('tp9-blocked-category-hidden');
+                }
+            }
+        }
+
+        var catLinks = mainEl.querySelectorAll(
+            '[data-a-target="preview-card-game-link"], [data-a-target="tw-card-title"], a[href*="/directory/category/"], a[href*="/directory/game/"]'
+        );
+        for (var c = 0; c < catLinks.length; c++) {
+            var cl = catLinks[c];
+            if (cl.closest && cl.closest('.tp9-blocked-category-hidden, .featured-content-carousel, .channel-info-content')) continue;
+            var href = cl.getAttribute('href') || '';
+            var slug = extractCategorySlugFromHref(href);
+            var txt = (cl.textContent || '').trim();
+            if (!isCategoryBlocked(txt, slug)) continue;
+            var cardWrap = findHideableCategoryCardWrapper(cl, mainEl);
+            if (cardWrap) {
+                cardWrap.classList.add('tp9-blocked-category-hidden');
+                bttvHadBlockedCatMarks = true;
+            }
+        }
+
+        // 2b. Masque les étagères devenues entièrement vides (ex: « GTA6 » + « Afficher tout > »)
+        //     et empêche les cartes restantes de s'étirer en 50 % / 100 % de largeur sur l'accueil
+        syncMainShelvesAndCardRowWidths(mainEl);
+
+        // 3. Carrousel principal en haut de la page d'accueil ('/') : coupe le son et passe au stream suivant si la catégorie est masquée
+        var pathNow = (typeof location !== 'undefined' && location.pathname) || '';
+        if (pathNow === '/' || pathNow === '') {
+            var heroCarousel = mainEl.querySelector('.featured-content-carousel, [data-a-target="featured-content-carousel"]');
+            if (heroCarousel && !heroCarousel.classList.contains('tp9-blocked-category-hidden')) {
+                var heroCatLinks = heroCarousel.querySelectorAll('a[href*="/directory/category/"], a[href*="/directory/game/"], [data-a-target="player-info-game-name"]');
+                var heroBlocked = false;
+                for (var h = 0; h < heroCatLinks.length; h++) {
+                    var hl = heroCatLinks[h];
+                    var hSlug = extractCategorySlugFromHref(hl.getAttribute('href') || '');
+                    var hTxt = (hl.textContent || '').trim();
+                    if (isCategoryBlocked(hTxt, hSlug)) {
+                        heroBlocked = true;
+                        break;
+                    }
+                }
+                if (heroBlocked) {
+                    var heroVids = heroCarousel.querySelectorAll('video');
+                    for (var hv = 0; hv < heroVids.length; hv++) {
+                        try {
+                            heroVids[hv].muted = true;
+                            if (!heroVids[hv].paused) heroVids[hv].pause();
+                        } catch (e) {}
+                    }
+                    var nowTs = Date.now();
+                    if (bttvCarouselSkipCount < 6 && (nowTs - bttvCarouselLastSkipAt) > 1400) {
+                        var nextBtn = heroCarousel.querySelector(
+                            '[data-a-target="carousel-nav-next"], button[aria-label*="Suivant" i], button[aria-label*="Next" i]'
+                        );
+                        if (nextBtn) {
+                            bttvCarouselLastSkipAt = nowTs;
+                            bttvCarouselSkipCount++;
+                            try { nextBtn.click(); } catch (e2) {}
+                        } else {
+                            heroCarousel.classList.add('tp9-blocked-category-hidden');
+                            bttvHadBlockedCatMarks = true;
+                        }
+                    } else if (bttvCarouselSkipCount >= 6) {
+                        heroCarousel.classList.add('tp9-blocked-category-hidden');
+                        bttvHadBlockedCatMarks = true;
+                    }
+                }
+            }
+        } else {
+            bttvCarouselSkipCount = 0;
+        }
+    }
+
+    function syncBlockedCategoriesState() {
+        rebuildBlockedCategoryIndex();
+        syncBlockedCategoriesStyleSheet();
+        if (document && document.body) {
+            document.body.classList.toggle(
+                'tp9-hide-categories',
+                !scriptIsOff() && pageConfig.hideCategories !== false && (bttvBlockedCatNormSet.size > 0 || bttvBlockedCatSlugSet.size > 0)
+            );
+        }
+        sweepBlockedCategories();
+    }
+
     function expandFollowedSidebarStep() {
         var sideNav = document.querySelector('[data-a-target="side-nav-bar"], .side-nav, #side-nav');
         if (!sideNav) return false;
 
-        var secRoot = getFollowedSectionRoot() || sideNav;
-        var cards = secRoot.querySelectorAll('.side-nav-card, [data-test-selector="side-nav-card"]');
+        var cards = getFollowedSectionCards(sideNav);
         var cardCount = cards.length;
 
         // Si l'utilisateur masque les chaînes hors ligne et qu'au moins une chaîne hors ligne
@@ -56308,6 +58848,7 @@ dashboardButton.style.visibility = 'hidden';
                 if (isSidebarCardOffline(cards[cIdx])) {
                     bttvSidebarStagnantCount = 0;
                     sweepOfflineSidebarChannels();
+                    sweepSidebarRedundantShowMoreButtons();
                     return false;
                 }
             }
