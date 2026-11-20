@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch HLS Proxy
 // @namespace    twitch-proxy-ivs
-// @version      1.12.6
+// @version      1.12.7
 // @author       razeNFR
 // @description  Twitch Guard : bloque les pubs Twitch (via proxys ou en mode Adblock sans proxy), retour arrière dans le direct et dashboard de statistiques
 // @match        https://www.twitch.tv/*
@@ -14,6 +14,9 @@
 // ==/UserScript==
 
 // ==Changelog==
+// 1.12.7
+// - Correctif de l'affichage des étagères sur la page d'accueil avec le masquage de catégories actif : conserve la taille normale des miniatures de streams (fini les streams géants à 50 % / 100 % ou écrasés en colonne) || Fixed homepage shelf layout when category hiding is active: keeps stream thumbnails at their normal grid size (no more giant 50% / 100% streams or squished columns)
+// - Correctif d'alignement dans la barre latérale lorsque « Pour vous » est masqué : l'icône de tri de « Chaînes suivies » ne chevauche plus le bouton pour replier la barre latérale || Fixed sidebar header alignment when "For You" is hidden: the "Followed Channels" sort icon no longer overlaps the sidebar collapse button
 // 1.12.6
 // - Nouvelle option « Masquer des catégories & leurs streams » (Auto & Épur.) avec recherche auto-complétée : cache les catégories choisies ainsi que tous les streamers qui les diffusent sur tout Twitch (barre latérale, accueil, parcourir, recherche) || New "Hide categories & their streams" option (Auto & Clean UI) with autocomplete search: hides selected categories and all streamers broadcasting them across Twitch (sidebar, home, browse, search)
 // - Nouveau mode « Garder si molette » sur la « Pause du défilement au focus » (Tchat & Filtres) : maintient le tchat en pause même lorsque le curseur sort du tchat après avoir remonté la discussion à la molette || New "Keep on wheel" mode on "Pause scroll on focus" (Chat & Filters): keeps chat paused even after the cursor leaves the chat window once scrolled up with the mouse wheel
@@ -113,7 +116,7 @@
         Math.random().toString(36).substring(2, 9);
 
     // Doit être tenu à jour avec le @version de l'en-tête du script.
-    var CURRENT_VERSION = '1.12.6';
+    var CURRENT_VERSION = '1.12.7';
 
     // Même URL que @updateURL : contient toujours la dernière version
     // publiée. On la relit nous-même (plutôt que de compter sur le
@@ -27972,6 +27975,20 @@ dashboardButton.style.visibility = 'hidden';
                 justify-content: flex-end !important;
                 min-height: 0 !important;
             }
+            body.tp9-hide-for-you #side-nav [data-a-target="side-nav-arrow"],
+            body.tp9-hide-for-you [data-a-target="side-nav-bar"] [data-a-target="side-nav-arrow"],
+            body.tp9-hide-for-you #side-nav :has(> [data-a-target="side-nav-arrow"]),
+            body.tp9-hide-for-you [data-a-target="side-nav-bar"] :has(> [data-a-target="side-nav-arrow"]) {
+                z-index: 6 !important;
+            }
+            body.tp9-hide-for-you .tp9-foryou-followed-header-offset {
+                width: calc(100% - 36px) !important;
+                max-width: calc(100% - 36px) !important;
+                margin-right: 36px !important;
+                margin-left: 0 !important;
+                align-self: flex-start !important;
+                box-sizing: border-box !important;
+            }
             body.tp9-hide-luna .tp9-luna-hidden,
             body.tp9-hide-luna #side-nav .side-nav-section:has(a[href*="luna.amazon." i]):not(:has(a[href^="/"])):not(:has(.side-nav-card)),
             body.tp9-hide-luna [data-a-target="side-nav-bar"] .side-nav-section:has(a[href*="luna.amazon." i]):not(:has(a[href^="/"])):not(:has(.side-nav-card)),
@@ -27987,14 +28004,18 @@ dashboardButton.style.visibility = 'hidden';
             body.tp9-hide-categories [class*="ScTransition"]:has(> .tp9-blocked-category-hidden) {
                 display: none !important;
             }
-            body.tp9-hide-categories .tp9-row-capped-cards {
+            body.tp9-hide-categories .tp9-row-capped-cards,
+            body.tp9-hide-categories .tp9-flex-host-start {
                 justify-content: flex-start !important;
             }
-            body.tp9-hide-categories .tp9-row-capped-cards > *:not(.tp9-blocked-category-hidden):not(.tw-tower__placeholder):not([class*="ScTowerPlaceholder"]) {
+            body.tp9-hide-categories .tp9-row-capped-cards > *:not(.tp9-blocked-category-hidden):not(.tp9-blocked-shelf-hidden):not(.tw-tower__placeholder):not([class*="ScTowerPlaceholder"]) {
                 flex-grow: 0 !important;
+                flex-shrink: 0 !important;
                 flex-basis: var(--tp9-card-slot-w, 25%) !important;
                 width: var(--tp9-card-slot-w, 25%) !important;
                 max-width: var(--tp9-card-slot-w, 25%) !important;
+                min-width: 0 !important;
+                box-sizing: border-box !important;
             }
             body.tp9-bttv-hide-recom [aria-label*="Chaînes recommandées" i],
             body.tp9-bttv-hide-recom [aria-label*="Recommended Channels" i],
@@ -57110,6 +57131,10 @@ dashboardButton.style.visibility = 'hidden';
         for (var j = 0; j < compactBars.length; j++) {
             compactBars[j].classList.remove('tp9-foryou-topbar-compact');
         }
+        var offsetHeaders = document.querySelectorAll('.tp9-foryou-followed-header-offset');
+        for (var k = 0; k < offsetHeaders.length; k++) {
+            offsetHeaders[k].classList.remove('tp9-foryou-followed-header-offset');
+        }
         bttvHadForYouMarks = false;
     }
 
@@ -57131,20 +57156,23 @@ dashboardButton.style.visibility = 'hidden';
             'button[aria-label*="Développer" i], button[aria-label*="Expand" i]'
         );
 
-        var followedAnchor = null;
-        var headingCandidates = sideNav.querySelectorAll('h1, h2, h3, h4, h5, p, span, [data-a-target="followed-channels-header"]');
+        var followedHeadingEl = null;
+        var firstOtherSectionHeadingEl = null;
+        var headingCandidates = sideNav.querySelectorAll('h1, h2, h3, h4, h5, h6, p, span, div, [data-a-target="followed-channels-header"]');
         for (var fh = 0; fh < headingCandidates.length; fh++) {
             var hc = headingCandidates[fh];
             if (hc.children && hc.children.length > 2) continue;
+            if (hc.tagName === 'DIV' && hc.children && hc.children.length > 0 && hc.getAttribute('data-a-target') !== 'followed-channels-header') continue;
             var fhTxt = (hc.textContent || '').trim();
             if (/^(chaînes\s+suivies|chaines\s+suivies|followed\s+channels)$/i.test(fhTxt)) {
-                followedAnchor = hc;
+                followedHeadingEl = hc;
                 break;
             }
+            if (!firstOtherSectionHeadingEl && /^(cha[îi]nes\s+live|cha[îi]nes\s+en\s+live|live\s+channels|cha[îi]nes\s+recommand[ée]es|recommended\s+channels)$/i.test(fhTxt)) {
+                firstOtherSectionHeadingEl = hc;
+            }
         }
-        if (!followedAnchor) {
-            followedAnchor = sideNav.querySelector('[data-test-selector="followed-channel"], .side-nav-card, [data-a-target="side-nav-card"]');
-        }
+        var followedAnchor = followedHeadingEl || sideNav.querySelector('[data-test-selector="followed-channel"], .side-nav-card, [data-a-target="side-nav-card"]');
 
         function isScrollOrMultiSectionWrapper(el) {
             if (!el || el === sideNav || el === document.body) return true;
@@ -57285,6 +57313,35 @@ dashboardButton.style.visibility = 'hidden';
                     climbSafeStoryItemBox(btn, 70);
                 }
             }
+        }
+
+        // E. Décale l'en-tête « Chaînes suivies » (et son bouton de tri ⇅) de 36px sur la droite pour qu'il ne chevauche
+        //    plus jamais la flèche de repli « <-| » positionnée en absolu en haut à droite de la barre latérale
+        //    (y compris si l'utilisateur scrolle la barre latérale vers le bas puis remonte tout en haut) :
+        var topSectionHeading = followedHeadingEl || firstOtherSectionHeadingEl;
+        var sideNavRect = sideNav.getBoundingClientRect ? sideNav.getBoundingClientRect() : { width: 240 };
+        if (topSectionHeading && collapseBtn && (sideNavRect.width >= 120 || sideNavRect.width === 0)) {
+            var headerRow = topSectionHeading;
+            var hGuard = 0;
+            while (
+                headerRow.parentElement &&
+                headerRow.parentElement !== sideNav &&
+                hGuard++ < 6
+            ) {
+                var hp = headerRow.parentElement;
+                if (collapseBtn && hp.contains && hp.contains(collapseBtn)) break;
+                if (hp.querySelector && hp.querySelector('.side-nav-card, [data-test-selector="followed-channel"], [data-a-target="side-nav-card"], a[href^="/"]')) {
+                    break;
+                }
+                var hpCls = typeof hp.className === 'string' ? hp.className : '';
+                if (/scroller|simplebar|side-nav__overlay|side-nav-contents/i.test(hpCls)) break;
+                if (hp.tagName === 'NAV') break;
+                var hpRect = hp.getBoundingClientRect ? hp.getBoundingClientRect() : { height: 36 };
+                if (hpRect.height > 58) break;
+                headerRow = hp;
+            }
+            headerRow.classList.add('tp9-foryou-followed-header-offset');
+            bttvHadForYouMarks = true;
         }
     }
 
@@ -57989,8 +58046,8 @@ dashboardButton.style.visibility = 'hidden';
             'body.tp9-hide-categories article:not(:has(article)):not(:has(.video-player)):has(' + joined + ') {' +
                 'display: none !important;' +
             '}' +
-            'body.tp9-hide-categories .tw-tower:has(> div:not(:has(.video-player)):has(' + joined + ')) > div:not(.tw-tower__placeholder):not([class*="ScTowerPlaceholder"]),' +
-            'body.tp9-hide-categories [class*="ScTower"]:has(> div:not(:has(.video-player)):has(' + joined + ')) > div:not(.tw-tower__placeholder):not([class*="ScTowerPlaceholder"]) {' +
+            'body.tp9-hide-categories .tw-tower:not(:has(.tw-tower)):not(:has(h2)):not(:has(h3)):not(:has([role="heading"])):has(> div:not(:has(.video-player)):has(' + joined + ')) > div:not(.tw-tower__placeholder):not([class*="ScTowerPlaceholder"]),' +
+            'body.tp9-hide-categories [class*="ScTower"]:not(:has([class*="ScTower"])):not(:has(h2)):not(:has(h3)):not(:has([role="heading"])):has(> div:not(:has(.video-player)):has(' + joined + ')) > div:not(.tw-tower__placeholder):not([class*="ScTowerPlaceholder"]) {' +
                 'flex-grow: 0 !important;' +
                 'max-width: var(--tp9-card-slot-w, 380px) !important;' +
             '}';
@@ -58186,28 +58243,80 @@ dashboardButton.style.visibility = 'hidden';
         return false;
     }
 
-    function elementContainsCardVisual(node) {
+    var SINGLE_CARD_BOUNDARY_SEL =
+        '.shelf-card__impression-wrapper, ' +
+        '[data-test-selector="shelf-card-selector"], ' +
+        '[data-a-target="search-result-live-channel"], ' +
+        '[data-a-target="search-result-category"], ' +
+        '[class*="box-art-card"], ' +
+        '[data-a-target*="box-art-card"], ' +
+        '[class*="game-card"], ' +
+        'article';
+
+    function isAvatarImageElement(imgEl) {
+        if (!imgEl || imgEl.nodeType !== 1) return false;
+        var cls = typeof imgEl.className === 'string' ? imgEl.className : '';
+        if (/avatar/i.test(cls)) return true;
+        if (imgEl.closest && imgEl.closest('[class*="avatar" i], [data-a-target*="avatar" i], .tw-avatar')) {
+            return true;
+        }
+        if (imgEl.getBoundingClientRect) {
+            var r = imgEl.getBoundingClientRect();
+            if (r.width > 0 && r.width <= 64 && r.height > 0 && r.height <= 64) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Détecte le visuel principal unique d'une carte (miniature 16:9 de stream ou jaquette de catégorie),
+    // en excluant strictement le petit avatar rond du streamer afin de ne JAMAIS confondre le sous-bloc
+    // « avatar + métadonnées » d'une carte avec une seconde carte sœur à l'intérieur du même <article> !
+    function elementHasPrimaryCardMedia(node) {
         if (!node || node.nodeType !== 1) return false;
-        if (node.tagName === 'ARTICLE' || node.tagName === 'IMG') return true;
+        if (node.tagName === 'ARTICLE') return true;
+        if (node.tagName === 'IMG') return !isAvatarImageElement(node);
         if (node.matches && node.matches(
             '[data-a-target="preview-card-image-link"], ' +
+            '[data-a-target="tw-card-title"], ' +
             '[data-a-target*="box-art"], ' +
             '[class*="box-art-card"], ' +
             '[class*="game-card"], ' +
-            '[class*="preview-card"]'
+            '[class*="preview-card-thumbnail"], ' +
+            '[class*="ScAspectRatio"], ' +
+            '[class*="tw-aspect"]'
+        )) {
+            return !node.closest || !node.closest('[class*="avatar" i], [data-a-target*="avatar" i]');
+        }
+        if (!node.querySelector) return false;
+        if (node.querySelector(
+            'article, ' +
+            '[data-a-target="preview-card-image-link"], ' +
+            '[data-a-target="tw-card-title"], ' +
+            '[data-a-target*="box-art"], ' +
+            '[class*="box-art-card"], ' +
+            '[class*="game-card"], ' +
+            '[class*="preview-card-thumbnail"]'
         )) {
             return true;
         }
-        if (!node.querySelector) return false;
-        return Boolean(node.querySelector(
-            'img, ' +
-            'article, ' +
-            '[data-a-target="preview-card-image-link"], ' +
-            '[data-a-target*="box-art"], ' +
-            '[class*="box-art-card"], ' +
-            '[class*="game-card"], ' +
-            '[class*="preview-card"]'
-        ));
+        if (node.querySelectorAll) {
+            var aspectEls = node.querySelectorAll('[class*="ScAspectRatio"], [class*="tw-aspect"]');
+            for (var a = 0; a < aspectEls.length; a++) {
+                if (!aspectEls[a].closest || !aspectEls[a].closest('[class*="avatar" i], [data-a-target*="avatar" i]')) {
+                    return true;
+                }
+            }
+            var imgs = node.querySelectorAll('img');
+            for (var i = 0; i < imgs.length; i++) {
+                if (!isAvatarImageElement(imgs[i])) return true;
+            }
+        }
+        return false;
+    }
+
+    function elementContainsCardVisual(node) {
+        return elementHasPrimaryCardMedia(node);
     }
 
     function findHideableCategoryCardWrapper(el, scopeRoot) {
@@ -58215,48 +58324,70 @@ dashboardButton.style.visibility = 'hidden';
         if (el.closest && el.closest('.channel-info-content, [data-a-target="stream-game-link"], .video-player, .stream-chat, #tp9-dashboard')) {
             return null;
         }
+        // Ne jamais traiter un lien situé dans un en-tête d'étagère (<h2>GTA6</h2>) comme une carte de stream :
+        // les étagères dédiées sont gérées proprement par hideEmptyCategoryShelf (.tp9-blocked-shelf-hidden).
+        if (
+            el.closest &&
+            el.closest('h1, h2, h3, [role="heading"]') &&
+            !el.closest(SINGLE_CARD_BOUNDARY_SEL + ', [class*="preview-card"], [data-a-target*="preview-card"], [data-a-target="tw-card-title"]')
+        ) {
+            return null;
+        }
         var origHref = (el.getAttribute && el.getAttribute('href')) || '';
         var cur = el;
         var best = null;
+
+        // Étape 1 : remonte d'abord directement jusqu'à l'enveloppe de carte explicite la plus haute
+        // (<article>, .shelf-card__impression-wrapper, .box-art-card, etc.) pour ne JAMAIS s'arrêter sur
+        // un sous-bloc interne (comme ScTextWrapper à côté de ScAvatar dans la même carte !).
+        var probe = el;
+        var pGuard = 0;
+        while (probe && probe !== scopeRoot && probe !== document.body && probe !== document.documentElement && pGuard++ < 12) {
+            if (probe.querySelector && probe.querySelector('.video-player, .stream-chat')) break;
+            if (countShelfHeadingsOutsideCards(probe) > 0) break;
+            if (probe.matches && probe.matches(SINGLE_CARD_BOUNDARY_SEL)) {
+                var innerArticles = probe.querySelectorAll ? probe.querySelectorAll('article') : [];
+                if (!innerArticles || innerArticles.length <= 1) {
+                    cur = probe;
+                    best = probe;
+                }
+            }
+            probe = probe.parentElement;
+        }
+
+        // Étape 2 : remonte ensuite à travers les enveloppes unitaires (ScTransitionBase, cellule Layout-sc)
+        // jusqu'à atteindre l'enfant DIRECT de la rangée horizontale de cartes !
         var guard = 0;
         while (cur && cur !== scopeRoot && cur !== document.body && cur !== document.documentElement && guard++ < 15) {
             var p = cur.parentElement;
             if (!p) break;
             if (cur.querySelector && cur.querySelector('.video-player, .stream-chat')) break;
-            var cls = typeof cur.className === 'string' ? cur.className : '';
+            if (countShelfHeadingsOutsideCards(cur) > 0) break;
+
             var pCls = typeof p.className === 'string' ? p.className : '';
-            var dt = (cur.getAttribute && (cur.getAttribute('data-test-selector') || cur.getAttribute('data-a-target'))) || '';
             var pRole = (p.getAttribute && p.getAttribute('role')) || '';
-            if (
-                cur.tagName === 'ARTICLE' ||
-                cls.indexOf('shelf-card__impression-wrapper') !== -1 ||
-                cls.indexOf('box-art-card') !== -1 ||
-                cls.indexOf('game-card') !== -1 ||
-                dt === 'shelf-card-selector' ||
-                dt === 'search-result-live-channel' ||
-                dt === 'search-result-category'
-            ) {
-                best = cur;
+            var curHasMedia = Boolean(best || elementHasPrimaryCardMedia(cur));
+
+            if (countShelfHeadingsOutsideCards(p) > 0) {
+                var multiInCur = cur.querySelectorAll ? cur.querySelectorAll('article, [data-a-target="preview-card-image-link"], [class*="box-art-card"]') : [];
+                if (multiInCur && multiInCur.length > 1) return best;
+                return best || (cur !== el && curHasMedia ? cur : null);
             }
-            if (pCls.indexOf('tw-tower') !== -1 || pCls.indexOf('ScTower') !== -1 || pRole === 'list') {
+
+            if ((pCls.indexOf('tw-tower') !== -1 || pCls.indexOf('ScTower') !== -1 || pRole === 'list') && curHasMedia) {
                 return cur;
             }
-            // Détection structurelle universelle (même avec classes CoreUI obfusquées Layout-sc-...) :
-            // dès que `cur` englobe le visuel de la carte (miniature/jaquette) ET que le parent `p` possède
-            // au moins une autre carte sœur distincte (ou un titre de section h1/h2/h3), `cur` est la cellule exacte !
-            if (cur !== el && p.children && p.children.length > 1) {
-                var curHasVisual = elementContainsCardVisual(cur);
+
+            if (cur !== el && curHasMedia && p.children && p.children.length > 1) {
                 var hasSiblingCard = false;
-                var hasSectionHeading = false;
                 for (var s = 0; s < p.children.length; s++) {
                     var sib = p.children[s];
                     if (!sib || sib === cur || sib.nodeType !== 1) continue;
-                    var sTag = sib.tagName;
-                    if (sTag === 'H1' || sTag === 'H2' || sTag === 'H3' || sTag === 'HEADER') {
-                        hasSectionHeading = true;
-                        break;
+                    var sibCls = typeof sib.className === 'string' ? sib.className : '';
+                    if (sibCls.indexOf('tw-tower__placeholder') !== -1 || sibCls.indexOf('ScTowerPlaceholder') !== -1) {
+                        continue;
                     }
-                    if (curHasVisual && elementContainsCardVisual(sib)) {
+                    if (elementHasPrimaryCardMedia(sib)) {
                         hasSiblingCard = true;
                         break;
                     }
@@ -58271,12 +58402,22 @@ dashboardButton.style.visibility = 'hidden';
                 if (hasSiblingCard) {
                     return cur;
                 }
-                if (hasSectionHeading && curHasVisual) {
-                    return best || cur;
-                }
             }
+
             if (p === scopeRoot || p.tagName === 'MAIN') {
-                return best || (cur !== el ? cur : null);
+                var manyInCur = cur.querySelectorAll ? cur.querySelectorAll('article, [data-a-target="preview-card-image-link"], [class*="box-art-card"]') : [];
+                if (manyInCur && manyInCur.length > 1) return best;
+                return best || (cur !== el && curHasMedia ? cur : null);
+            }
+
+            // Si `p` est déjà le conteneur de rangée directement sous une section titrée (cas d'une rangée à 1 seule carte),
+            // on s'arrête sur `cur` (la cellule) pour que `p` reste la rangée inspectée par syncMainShelvesAndCardRowWidths.
+            if (curHasMedia && p.parentElement && countShelfHeadingsOutsideCards(p.parentElement) > 0) {
+                return cur;
+            }
+
+            if (best && p.children && p.children.length === 1) {
+                best = p;
             }
             cur = p;
         }
@@ -58286,6 +58427,8 @@ dashboardButton.style.visibility = 'hidden';
     function clearRowCardCapStyle(rowEl) {
         if (!rowEl || !rowEl.classList) return;
         rowEl.classList.remove('tp9-row-capped-cards');
+        rowEl.classList.remove('tp9-grid-capped-cards');
+        rowEl.classList.remove('tp9-flex-host-start');
         if (rowEl.style && typeof rowEl.style.removeProperty === 'function') {
             rowEl.style.removeProperty('--tp9-card-slot-w');
             if (rowEl.__tp9GridCapped) {
@@ -58305,7 +58448,7 @@ dashboardButton.style.visibility = 'hidden';
         for (var s = 0; s < prevShelves.length; s++) {
             prevShelves[s].classList.remove('tp9-blocked-shelf-hidden');
         }
-        var prevRows = document.querySelectorAll('.tp9-row-capped-cards');
+        var prevRows = document.querySelectorAll('.tp9-row-capped-cards, .tp9-grid-capped-cards, .tp9-flex-host-start');
         for (var r = 0; r < prevRows.length; r++) {
             clearRowCardCapStyle(prevRows[r]);
         }
@@ -58504,7 +58647,7 @@ dashboardButton.style.visibility = 'hidden';
         }
 
         // Nettoie les rangées anciennement plafonnées qui n'ont plus aucune carte masquée
-        var prevCappedRows = mainEl.querySelectorAll('.tp9-row-capped-cards');
+        var prevCappedRows = mainEl.querySelectorAll('.tp9-row-capped-cards, .tp9-grid-capped-cards');
         for (var pr = 0; pr < prevCappedRows.length; pr++) {
             if (!affectedRows.has(prevCappedRows[pr])) {
                 clearRowCardCapStyle(prevCappedRows[pr]);
@@ -58517,6 +58660,7 @@ dashboardButton.style.visibility = 'hidden';
             var visibleCount = 0;
             var sampleCard = null;
             var isBoxArtRow = false;
+            var containsShelfSectionChild = false;
 
             for (var k = 0; k < rowEl.children.length; k++) {
                 var ch = rowEl.children[k];
@@ -58526,7 +58670,14 @@ dashboardButton.style.visibility = 'hidden';
                     continue;
                 }
                 var chTag = ch.tagName;
-                if (chTag === 'H1' || chTag === 'H2' || chTag === 'H3' || chTag === 'HEADER') continue;
+                if (chTag === 'H1' || chTag === 'H2' || chTag === 'H3' || chTag === 'HEADER') {
+                    containsShelfSectionChild = true;
+                    continue;
+                }
+                if (countShelfHeadingsOutsideCards(ch) > 0) {
+                    containsShelfSectionChild = true;
+                    continue;
+                }
 
                 if (ch.classList && ch.classList.contains('tp9-blocked-category-hidden')) {
                     hiddenCount++;
@@ -58535,6 +58686,19 @@ dashboardButton.style.visibility = 'hidden';
                     visibleCount++;
                     sampleCard = ch;
                 }
+            }
+
+            if (visibleCount === 0 && hiddenCount > 0) {
+                clearRowCardCapStyle(rowEl);
+                if (!containsShelfSectionChild || countShelfHeadingsOutsideCards(rowEl) <= 1) {
+                    hideEmptyCategoryShelf(rowEl, mainEl);
+                }
+                return;
+            }
+
+            if (containsShelfSectionChild) {
+                clearRowCardCapStyle(rowEl);
+                return;
             }
 
             if (sampleCard) {
@@ -58547,12 +58711,6 @@ dashboardButton.style.visibility = 'hidden';
                 }
             }
 
-            if (visibleCount === 0 && hiddenCount > 0) {
-                clearRowCardCapStyle(rowEl);
-                hideEmptyCategoryShelf(rowEl, mainEl);
-                return;
-            }
-
             if (visibleCount >= 1 && hiddenCount >= 1) {
                 var totalCards = visibleCount + hiddenCount;
                 var layoutHost = rowEl;
@@ -58563,9 +58721,19 @@ dashboardButton.style.visibility = 'hidden';
                     layoutHost = layoutHost.parentElement;
                     cs = window.getComputedStyle(layoutHost);
                 }
+                var disp = cs ? String(cs.display || '').toLowerCase() : '';
+                var flexDir = cs ? String(cs.flexDirection || '').toLowerCase() : '';
+                var isHorizontalFlexRow = (disp.indexOf('flex') !== -1 && flexDir.indexOf('column') !== 0);
+                var isGridContainer = (disp.indexOf('grid') !== -1);
+                // Ne plafonne JAMAIS un conteneur vertical (flex-direction: column) ni un bloc standard !
+                if (!isHorizontalFlexRow && !isGridContainer) {
+                    clearRowCardCapStyle(rowEl);
+                    if (layoutHost !== rowEl) clearRowCardCapStyle(layoutHost);
+                    return;
+                }
+
                 var rowRect = layoutHost.getBoundingClientRect ? layoutHost.getBoundingClientRect() : { width: 0 };
                 var rowW = rowRect.width || 0;
-                var disp = cs ? (cs.display || '') : 'flex';
                 var flexWrap = cs ? (cs.flexWrap || '') : '';
                 var gapPx = cs ? (parseFloat(cs.columnGap || cs.gap) || 0) : 0;
                 var minSlotPx = isBoxArtRow ? 145 : 250;
@@ -58594,20 +58762,41 @@ dashboardButton.style.visibility = 'hidden';
                     }
                 }
 
+                // Plancher minimal selon la largeur réelle de la rangée : empêche tout stream géant (50 % / 100 %)
+                // même si Twitch n'a renvoyé que 2 ou 3 cartes dans une étagère sur grand écran !
+                var naturalMinCols = isBoxArtRow
+                    ? (rowW >= 1600 ? 8 : (rowW >= 1250 ? 6 : (rowW >= 900 ? 5 : 4)))
+                    : (rowW >= 1850 ? 5 : (rowW >= 1250 ? 4 : (rowW >= 880 ? 3 : 2)));
+                if (rowW > 0 && cols < naturalMinCols) {
+                    cols = naturalMinCols;
+                }
+
+                // Garde-fou maximal : ne jamais écraser des cartes de live sous ~240px de large (ou > 6 colonnes)
+                var hardMaxCols = isBoxArtRow ? 10 : 6;
+                if (rowW > 0) {
+                    var fitMaxCols = Math.max(2, Math.floor((rowW + gapPx) / ((isBoxArtRow ? 140 : 240) + gapPx)));
+                    hardMaxCols = Math.min(hardMaxCols, fitMaxCols);
+                }
+                cols = Math.max(2, Math.min(cols, hardMaxCols));
+
                 var slotWidthExpr = gapPx > 0.5
                     ? ('calc((100% - ' + ((cols - 1) * gapPx).toFixed(1) + 'px) / ' + cols + ')')
                     : ((100 / cols).toFixed(4) + '%');
 
-                rowEl.classList.add('tp9-row-capped-cards');
-                if (rowEl.style && typeof rowEl.style.setProperty === 'function') {
-                    rowEl.style.setProperty('--tp9-card-slot-w', slotWidthExpr);
-                }
-                if (disp.indexOf('grid') !== -1 && layoutHost.style && typeof layoutHost.style.setProperty === 'function') {
-                    layoutHost.style.setProperty('grid-template-columns', 'repeat(' + cols + ', minmax(0, 1fr))', 'important');
-                    layoutHost.__tp9GridCapped = true;
-                    if (layoutHost !== rowEl) {
-                        layoutHost.classList.add('tp9-row-capped-cards');
-                        layoutHost.style.setProperty('--tp9-card-slot-w', slotWidthExpr);
+                if (isGridContainer) {
+                    clearRowCardCapStyle(rowEl);
+                    if (layoutHost.style && typeof layoutHost.style.setProperty === 'function') {
+                        layoutHost.classList.add('tp9-grid-capped-cards');
+                        layoutHost.style.setProperty('grid-template-columns', 'repeat(' + cols + ', minmax(0, 1fr))', 'important');
+                        layoutHost.__tp9GridCapped = true;
+                    }
+                } else {
+                    rowEl.classList.add('tp9-row-capped-cards');
+                    if (layoutHost !== rowEl && layoutHost.classList) {
+                        layoutHost.classList.add('tp9-flex-host-start');
+                    }
+                    if (rowEl.style && typeof rowEl.style.setProperty === 'function') {
+                        rowEl.style.setProperty('--tp9-card-slot-w', slotWidthExpr);
                     }
                 }
                 bttvHadBlockedCatMarks = true;
